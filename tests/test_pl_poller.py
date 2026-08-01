@@ -1,6 +1,7 @@
+import pytest
 from google.transit import gtfs_realtime_pb2
 
-from poland_poller import parse_pl_vehicles, resolve_delays, _scheduled_epoch
+from poland_poller import parse_pl_vehicles, resolve_delays, _scheduled_epoch, _interpolate_position
 
 def make_feed():
     feed = gtfs_realtime_pb2.FeedMessage()
@@ -72,21 +73,38 @@ def test_scheduled_epoch_no_time_returns_none():
 
 
 class _FakeCursor:
+    # Pass a single value to have every fetchone() call return it (used by
+    # the older tests below, and by anything only exercising the first
+    # query). Pass a list to have successive execute()+fetchone() calls
+    # consume one entry each, in order - needed once resolve_delays started
+    # issuing a second query per row (the previous-stop lookup for position
+    # interpolation).
     def __init__(self, response):
         self._response = response
+        self._is_sequence = isinstance(response, list)
+        self._call_idx = 0
         self.last_query_args = None
 
     def execute(self, query, args):
         self.last_query_args = args
 
     def fetchone(self):
-        return self._response
+        if not self._is_sequence:
+            return self._response
+        r = self._response[self._call_idx] if self._call_idx < len(self._response) else None
+        self._call_idx += 1
+        return r
 
 def test_resolve_delays_computes_delay_from_scheduled_and_actual():
     # station_id=42, scheduled_arrival="09:59:00" (2026-08-01, Warsaw),
-    # actual arrival 60s later than scheduled
+    # actual arrival 60s later than scheduled. No previous-stop row (second
+    # fetchone() call returns None) so no position is estimated here -
+    # covered separately below.
     scheduled = _scheduled_epoch("20260801", "09:59:00")
-    cur = _FakeCursor((42, "09:59:00", None, "Warszawa Centralna", "IC 1", "Kraków Główny"))
+    cur = _FakeCursor([
+        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny"),
+        None,
+    ])
     rows = [{
         "gtfs_trip_id": "T1", "start_date": "20260801",
         "stop_sequence": 3, "actual_epoch": scheduled + 60,
@@ -98,6 +116,9 @@ def test_resolve_delays_computes_delay_from_scheduled_and_actual():
     assert resolved[0]["route_name"] == "IC 1"
     assert resolved[0]["headsign"] == "Kraków Główny"
     assert resolved[0]["delay_minutes"] == 1.0
+    assert resolved[0]["lat"] is None
+    assert resolved[0]["lon"] is None
+    assert resolved[0]["position_source"] is None
 
 def test_resolve_delays_skips_unmatched_trips():
     cur = _FakeCursor(None)
@@ -106,3 +127,45 @@ def test_resolve_delays_skips_unmatched_trips():
         "stop_sequence": 0, "actual_epoch": 1785551442,
     }]
     assert resolve_delays(cur, rows) == []
+
+def test_resolve_delays_estimates_position_from_previous_stop():
+    # Previous stop (Warszawa Centralna) scheduled to depart 09:00, target
+    # stop (Kraków Główny) scheduled to arrive 12:00 - both same day. Poll
+    # happens exactly 1/4 of the way through that window (09:45), so the
+    # estimated marker should sit 1/4 of the way between the two stations.
+    prev_departure = _scheduled_epoch("20260801", "09:00:00")
+    target_arrival = _scheduled_epoch("20260801", "12:00:00")
+    now = prev_departure + (target_arrival - prev_departure) * 0.25
+    cur = _FakeCursor([
+        (42, "12:00:00", None, "Kraków Główny", 50.0680, 19.9476, "IC 1", None),
+        (52.2297, 21.0122, "09:00:00", None),  # previous stop: Warszawa Centralna
+    ])
+    rows = [{
+        "gtfs_trip_id": "T1", "start_date": "20260801",
+        "stop_sequence": 5, "actual_epoch": target_arrival,
+    }]
+    resolved = resolve_delays(cur, rows, now_epoch=now)
+    assert len(resolved) == 1
+    assert resolved[0]["position_source"] == "estimated"
+    expected_lat = 52.2297 + 0.25 * (50.0680 - 52.2297)
+    expected_lon = 21.0122 + 0.25 * (19.9476 - 21.0122)
+    assert resolved[0]["lat"] == pytest.approx(expected_lat)
+    assert resolved[0]["lon"] == pytest.approx(expected_lon)
+
+def test_interpolate_position_clamps_to_target_when_now_is_past_arrival():
+    lat, lon = _interpolate_position(
+        prev_lat=52.0, prev_lon=21.0, prev_epoch=1000,
+        target_lat=50.0, target_lon=19.0, target_epoch=2000,
+        now_epoch=5000,  # well past target_epoch
+    )
+    assert lat == pytest.approx(50.0)
+    assert lon == pytest.approx(19.0)
+
+def test_interpolate_position_returns_none_without_a_previous_stop():
+    lat, lon = _interpolate_position(
+        prev_lat=None, prev_lon=None, prev_epoch=None,
+        target_lat=50.0, target_lon=19.0, target_epoch=2000,
+        now_epoch=1500,
+    )
+    assert lat is None
+    assert lon is None

@@ -52,7 +52,22 @@ if not cur.fetchone():
 
 print(f"Importing stops for {country}...")
 stops = pd.read_csv(f"{gtfs_dir}/stops.txt", dtype=str)
+# Child stop_id -> parent (top-level) stop_id, built from the raw file
+# before filtering below. Needed by --with-stop-times: confirmed against
+# DE's static stop_times.txt that it references only platform-level child
+# stop_ids (667/667 in a sample), never the top-level ids `stations` keeps
+# - the same mismatch germany_poller.py's load_parent_map() already works
+# around for the *live* feed, but the *static* import path never got the
+# equivalent fix until now. Harmless where it isn't needed (HU doesn't use
+# --with-stop-times; PL's own stop_times mostly references top-level ids
+# directly, so this dict mostly stays unused for PL rows) and strictly
+# improves PL's existing ~5% unresolved rate for the child ids it does hit.
+parent_of = {}
 if "parent_station" in stops.columns:
+    for _, row in stops.iterrows():
+        parent = row.get("parent_station")
+        if isinstance(parent, str) and parent.strip():
+            parent_of[row["stop_id"]] = parent.strip()
     # A row with a parent_station is a child (platform/entrance/node) of
     # another row in this same file — importing it too would duplicate a
     # single delay event across every platform of a station. Import only
@@ -126,6 +141,7 @@ if args.with_stop_times:
     stop_times = pd.read_csv(f"{gtfs_dir}/stop_times.txt", dtype=str)
     inserted = 0
     for _, row in stop_times.iterrows():
+        resolved_stop_id = parent_of.get(row["stop_id"], row["stop_id"])
         cur.execute("""
             INSERT INTO stop_times (trip_id, station_id, scheduled_arrival, scheduled_departure, stop_sequence)
             SELECT t.id, s.id, %s, %s, %s
@@ -134,7 +150,7 @@ if args.with_stop_times:
               AND s.gtfs_stop_id = %s AND s.country_code = %s
         """, (
             row.get("arrival_time"), row.get("departure_time"), row["stop_sequence"],
-            row["trip_id"], country, row["stop_id"], country,
+            row["trip_id"], country, resolved_stop_id, country,
         ))
         inserted += cur.rowcount
     conn.commit()

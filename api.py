@@ -319,9 +319,14 @@ def _live_result(rows, stop_key):
     # headsign/lat/lon are populated for AT (HAFAS radar's direction/location,
     # both confirmed ~100% filled in real data) and headsign-only for PL (via
     # the trips.headsign static join in resolve_delays); DE's underlying rows
-    # carry neither (no headsign in gtfs.de's static feed, no position in a
-    # TripUpdates-only stream) so .get() falls through to None for it, same
-    # as before this existed.
+    # carry neither (no headsign in gtfs.de's static feed) so .get() falls
+    # through to None for it, same as before this existed.
+    #
+    # position_source distinguishes AT's real GPS ("live") from PL/DE's
+    # schedule-interpolated marker ("estimated") - see resolve_delays() in
+    # poland_poller.py/germany_poller.py and PLAN.md for why no live GPS
+    # exists for either country. Never silently blend the two - a consumer
+    # must always be able to tell which kind of position a row holds.
     return [
         {
             "route_name": row["route_name"],
@@ -334,12 +339,16 @@ def _live_result(rows, stop_key):
             "stop_idx": None,
             "lat": row.get("lat"),
             "lon": row.get("lon"),
+            "position_source": row.get("position_source"),
         }
         for row in rows
     ]
 
 def _live_at():
-    return _live_result(parse_at_vehicles(call_radar()), "stop_name")
+    rows = parse_at_vehicles(call_radar())
+    for row in rows:
+        row["position_source"] = "live" if row.get("lat") is not None else None
+    return _live_result(rows, "stop_name")
 
 def _live_pl():
     conn = get_conn()
@@ -436,6 +445,12 @@ def get_live_hu():
             "stop_idx": stop_idx,
             "lat": lat,
             "lon": lon,
+            # Real position off the live feed (either the vehicle's own
+            # reported lat/lon, or its current stop's known location as a
+            # fallback) - not a schedule-interpolated estimate, so "live"
+            # either way. See _live_result()'s comment for why this field
+            # exists: PL/DE fall back to "estimated", never silently blended.
+            "position_source": "live" if lat is not None else None,
         })
 
     return result

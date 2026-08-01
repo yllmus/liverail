@@ -73,15 +73,19 @@ def poll():
     count = 0
     for row in rows:
         print(f"  {row['route_name']} at {row['stop_name']}: {row['delay_minutes']}")
+        # Real GPS straight off the live feed (not the schedule-interpolated
+        # estimate PL/DE fall back to) - tagged explicitly so a consumer
+        # never has to guess which kind of position a row holds.
+        position_source = "live" if row["lat"] is not None else None
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon)
-            SELECT s.id, %s, NOW(), %s, false, %s, %s, %s, %s, %s
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source)
+            SELECT s.id, %s, NOW(), %s, false, %s, %s, %s, %s, %s, %s
             FROM stations s
             WHERE s.name = %s AND s.country_code = %s
         """, (
             date.today(), row["delay_minutes"], row["route_name"], COUNTRY_CODE,
-            row["headsign"], row["lat"], row["lon"], row["stop_name"], COUNTRY_CODE,
+            row["headsign"], row["lat"], row["lon"], position_source, row["stop_name"], COUNTRY_CODE,
         ))
         count += 1
     conn.commit()

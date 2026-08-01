@@ -1,3 +1,4 @@
+import time
 import requests
 import psycopg2
 from datetime import datetime, timedelta
@@ -73,18 +74,41 @@ def _scheduled_epoch(start_date, hms):
     naive = base.replace(hour=h, minute=m, second=s) + timedelta(days=extra_days)
     return naive.replace(tzinfo=WARSAW_TZ).timestamp()
 
-def resolve_delays(cur, rows):
+def _interpolate_position(prev_lat, prev_lon, prev_epoch, target_lat, target_lon, target_epoch, now_epoch):
+    # Pure math, no DB/time.time() dependency (now_epoch is a parameter, not
+    # read internally) so this is directly unit-testable. No live GPS exists
+    # for PL - confirmed directly (mkuran.pl's own file listing has no
+    # position feed alongside updates.pb for polish_trains specifically,
+    # its README states live positions "may be available sometime in the
+    # future", and PKP PLK's own full OpenAPI schema - the same one their
+    # official passenger portal calls - has zero lat/lon/coordinate fields
+    # anywhere, checked field-by-field). This estimates a marker between the
+    # previous scheduled stop and the target one, proportional to elapsed vs
+    # scheduled travel time - the same technique Deutsche Bahn's own
+    # official "Zugradar" used for years (it also wasn't real GPS) before
+    # being retired, not a fabricated position. Callers must label this
+    # distinctly from HU/AT's real GPS - see position_source.
+    if prev_lat is None or prev_lon is None or prev_epoch is None or target_epoch <= prev_epoch:
+        return None, None
+    fraction = max(0.0, min(1.0, (now_epoch - prev_epoch) / (target_epoch - prev_epoch)))
+    lat = prev_lat + fraction * (target_lat - prev_lat)
+    lon = prev_lon + fraction * (target_lon - prev_lon)
+    return lat, lon
+
+def resolve_delays(cur, rows, now_epoch=None):
     # DB-dependent step. Joins each raw (trip_id, stop_sequence) against our
     # stop_times table to get the scheduled stop and scheduled time, then
     # delay = actual - scheduled. Silently resolves to nothing if the trip
     # isn't in our PL trips (unimported/stale) or the stop_id it references
     # was one of the platform-level rows import.py's parent_station filter
     # excluded from stations - same graceful-skip behavior as HU/AT.
+    if now_epoch is None:
+        now_epoch = time.time()
     resolved = []
     for row in rows:
         cur.execute("""
             SELECT st.station_id, st.scheduled_arrival, st.scheduled_departure,
-                   s.name, r.name, t.headsign
+                   s.name, s.lat, s.lon, r.name, t.headsign
             FROM trips t
             JOIN stop_times st ON st.trip_id = t.id AND st.stop_sequence = %s
             JOIN stations s ON s.id = st.station_id
@@ -94,16 +118,42 @@ def resolve_delays(cur, rows):
         match = cur.fetchone()
         if not match:
             continue
-        station_id, sched_arrival, sched_departure, station_name, route_name, headsign = match
+        (station_id, sched_arrival, sched_departure, station_name,
+         target_lat, target_lon, route_name, headsign) = match
         scheduled_epoch = _scheduled_epoch(row["start_date"], sched_arrival or sched_departure)
         if scheduled_epoch is None:
             continue
+
+        lat = lon = None
+        position_source = None
+        cur.execute("""
+            SELECT s.lat, s.lon, st.scheduled_arrival, st.scheduled_departure
+            FROM stop_times st
+            JOIN stations s ON s.id = st.station_id
+            WHERE st.trip_id = (SELECT id FROM trips WHERE gtfs_trip_id = %s AND country_code = %s)
+              AND st.stop_sequence < %s
+            ORDER BY st.stop_sequence DESC
+            LIMIT 1
+        """, (row["gtfs_trip_id"], COUNTRY_CODE, row["stop_sequence"]))
+        prev = cur.fetchone()
+        if prev:
+            prev_lat, prev_lon, prev_sched_arrival, prev_sched_departure = prev
+            prev_epoch = _scheduled_epoch(row["start_date"], prev_sched_departure or prev_sched_arrival)
+            lat, lon = _interpolate_position(
+                prev_lat, prev_lon, prev_epoch, target_lat, target_lon, row["actual_epoch"], now_epoch
+            )
+            if lat is not None:
+                position_source = "estimated"
+
         resolved.append({
             "station_id": station_id,
             "station_name": station_name,
             "route_name": route_name,
             "headsign": headsign,
             "delay_minutes": round((row["actual_epoch"] - scheduled_epoch) / 60, 2),
+            "lat": lat,
+            "lon": lon,
+            "position_source": position_source,
         })
     return resolved
 
@@ -121,9 +171,12 @@ def poll():
         print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign)
-            VALUES (%s, CURRENT_DATE, NOW(), %s, false, %s, %s, %s)
-        """, (row["station_id"], row["delay_minutes"], row["route_name"], COUNTRY_CODE, row["headsign"]))
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source)
+            VALUES (%s, CURRENT_DATE, NOW(), %s, false, %s, %s, %s, %s, %s, %s)
+        """, (
+            row["station_id"], row["delay_minutes"], row["route_name"], COUNTRY_CODE, row["headsign"],
+            row["lat"], row["lon"], row["position_source"],
+        ))
         count += 1
     conn.commit()
     cur.close()
