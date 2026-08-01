@@ -3,6 +3,7 @@ import os
 
 import pytest
 from fastapi.testclient import TestClient
+from google.transit import gtfs_realtime_pb2
 
 import api
 
@@ -72,20 +73,21 @@ def test_live_pl_mocks_gtfs_rt_fetch(monkeypatch):
     feed.header.gtfs_realtime_version = "2.0"
     e = feed.entity.add()
     e.id = "1"
-    e.trip_update.trip.trip_id = "T1"
-    e.trip_update.trip.route_id = "R1"
+    e.trip_update.trip.trip_id = "does-not-exist"
+    e.trip_update.trip.start_date = "20260801"
     stu = e.trip_update.stop_time_update.add()
-    stu.stop_id = "S1"
-    stu.arrival.delay = 120
+    stu.stop_sequence = 0
+    stu.arrival.time = 1785551442
 
     monkeypatch.setattr(api, "fetch_feed", lambda: feed)
     api._PL_LIVE_CACHE["data"] = None
     api._PL_LIVE_CACHE["expires"] = 0
 
-    # No real PL stations/routes exist in this DB yet, so the ID lookup
-    # inside get_live_pl() won't match anything — this only exercises the
-    # fetch/parse/dispatch path, same real-DB approach as the rest of this
-    # suite, not a claim that PL data resolution works end-to-end.
+    # gtfs_trip_id "does-not-exist" won't resolve against real PL trips, so
+    # resolve_delays() legitimately returns nothing - this only exercises
+    # the fetch/parse/resolve/dispatch path end to end, real DB included
+    # (real PL stop_times are imported as of this test running), not a
+    # claim about matching a specific live vehicle.
     resp = client.get("/live?country=PL")
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)

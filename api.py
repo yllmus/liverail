@@ -6,7 +6,7 @@ import requests as req
 import time
 from datetime import datetime, timedelta
 from austria_poller import call_radar, parse_at_vehicles
-from poland_poller import fetch_feed, parse_pl_vehicles
+from poland_poller import fetch_feed, parse_pl_vehicles, resolve_delays
 
 app = FastAPI()
 
@@ -348,35 +348,28 @@ def get_live_pl():
         return _PL_LIVE_CACHE["data"]
 
     feed = fetch_feed()
-    rows = parse_pl_vehicles(feed)
+    raw_rows = parse_pl_vehicles(feed)
 
     conn = get_conn()
     cur = conn.cursor()
-    result = []
-    for row in rows:
-        cur.execute("""
-            SELECT s.name, r.name
-            FROM stations s, routes r
-            WHERE s.gtfs_stop_id = %s AND s.country_code = 'PL'
-              AND r.gtfs_route_id = %s AND r.country_code = 'PL'
-        """, (row["gtfs_stop_id"], row["gtfs_route_id"]))
-        match = cur.fetchone()
-        if not match:
-            continue
-        stop_name, route_name = match
-        result.append({
-            "route_name": route_name,
+    resolved = resolve_delays(cur, raw_rows)
+    cur.close()
+    conn.close()
+
+    result = [
+        {
+            "route_name": row["route_name"],
             "train_number": "",
-            "current_stop": stop_name,
+            "current_stop": row["station_name"],
             "delay_minutes": row["delay_minutes"],
             "status": "IN_TRANSIT_TO",
             "stops": [],
             "stop_idx": None,
             "lat": None,
             "lon": None,
-        })
-    cur.close()
-    conn.close()
+        }
+        for row in resolved
+    ]
 
     _PL_LIVE_CACHE["data"] = result
     _PL_LIVE_CACHE["expires"] = now + PL_LIVE_CACHE_TTL
