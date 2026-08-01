@@ -306,121 +306,79 @@ def _fmt_time(sec):
     m = (sec % 3600) // 60
     return f"{h:02d}:{m:02d}"
 
+# Registry-driven /live dispatch. Each non-HU country provides a zero-arg
+# fetch function that returns rows already shaped for the response; adding a
+# country means writing one small _live_xx() function and one entry in
+# _LIVE_PROVIDERS, not another copy-pasted cache+fetch+reshape block. HU
+# stays a special case outside the registry since get_live_hu() has no
+# cache/TTL (see its own definition below).
+_LIVE_CACHE = {}  # country_code -> {"data": [...], "expires": epoch}
+
+def _live_result(rows, stop_key):
+    return [
+        {
+            "route_name": row["route_name"],
+            "train_number": "",
+            "current_stop": row[stop_key],
+            "delay_minutes": row["delay_minutes"],
+            "status": "IN_TRANSIT_TO",
+            "stops": [],
+            "stop_idx": None,
+            "lat": None,
+            "lon": None,
+        }
+        for row in rows
+    ]
+
+def _live_at():
+    return _live_result(parse_at_vehicles(call_radar()), "stop_name")
+
+def _live_pl():
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        rows = resolve_delays(cur, parse_pl_vehicles(fetch_feed()))
+    finally:
+        cur.close()
+        conn.close()
+    return _live_result(rows, "station_name")
+
+def _live_de():
+    # PL/DE's /live is schedule-vs-actual for whatever's currently in the
+    # TripUpdates feed, not a vehicle-position snapshot the way HU/AT's
+    # radar-style calls are - and DE's resolve rate is ~16% of the raw feed
+    # (most of gtfs.de's realtime-free.pb is non-rail traffic outside DE's
+    # rail-only static import, same rail-only scope as HU/AT/PL).
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        rows = resolve_de_delays(cur, parse_de_vehicles(fetch_de_feed()))
+    finally:
+        cur.close()
+        conn.close()
+    return _live_result(rows, "station_name")
+
+_LIVE_PROVIDERS = {
+    "AT": (_live_at, 25),
+    "PL": (_live_pl, 25),
+    "DE": (_live_de, 25),
+}
+
 @app.get("/live")
 def get_live(country: str = "HU"):
-    if country == "AT":
-        return get_live_at()
-    if country == "PL":
-        return get_live_pl()
-    if country == "DE":
-        return get_live_de()
-    return get_live_hu()
-
-_AT_LIVE_CACHE = {"data": None, "expires": 0}
-AT_LIVE_CACHE_TTL = 25
-
-def get_live_at():
+    if country == "HU":
+        return get_live_hu()
+    provider = _LIVE_PROVIDERS.get(country)
+    if provider is None:
+        return []
+    fetch_fn, ttl = provider
     now = time.time()
-    if _AT_LIVE_CACHE["data"] is not None and now < _AT_LIVE_CACHE["expires"]:
-        return _AT_LIVE_CACHE["data"]
-
-    movements = call_radar()
-    result = [
-        {
-            "route_name": row["route_name"],
-            "train_number": "",
-            "current_stop": row["stop_name"],
-            "delay_minutes": row["delay_minutes"],
-            "status": "IN_TRANSIT_TO",
-            "stops": [],
-            "stop_idx": None,
-            "lat": None,
-            "lon": None,
-        }
-        for row in parse_at_vehicles(movements)
-    ]
-    _AT_LIVE_CACHE["data"] = result
-    _AT_LIVE_CACHE["expires"] = now + AT_LIVE_CACHE_TTL
-    return result
-
-_PL_LIVE_CACHE = {"data": None, "expires": 0}
-PL_LIVE_CACHE_TTL = 25
-
-def get_live_pl():
-    now = time.time()
-    if _PL_LIVE_CACHE["data"] is not None and now < _PL_LIVE_CACHE["expires"]:
-        return _PL_LIVE_CACHE["data"]
-
-    feed = fetch_feed()
-    raw_rows = parse_pl_vehicles(feed)
-
-    conn = get_conn()
-    cur = conn.cursor()
-    resolved = resolve_delays(cur, raw_rows)
-    cur.close()
-    conn.close()
-
-    result = [
-        {
-            "route_name": row["route_name"],
-            "train_number": "",
-            "current_stop": row["station_name"],
-            "delay_minutes": row["delay_minutes"],
-            "status": "IN_TRANSIT_TO",
-            "stops": [],
-            "stop_idx": None,
-            "lat": None,
-            "lon": None,
-        }
-        for row in resolved
-    ]
-
-    _PL_LIVE_CACHE["data"] = result
-    _PL_LIVE_CACHE["expires"] = now + PL_LIVE_CACHE_TTL
-    return result
-
-_DE_LIVE_CACHE = {"data": None, "expires": 0}
-DE_LIVE_CACHE_TTL = 25
-
-def get_live_de():
-    # Same semantic gap as PL's /live: this is a GTFS-RT TripUpdates feed
-    # (schedule-vs-actual for whatever's currently in transit), not a
-    # vehicle-position snapshot the way HU/AT's radar-style calls are - and
-    # unlike PL, resolution here also only covers ~16% of the raw feed
-    # (most of gtfs.de's realtime-free.pb is non-rail bus/tram traffic from
-    # regional transit operators that DE's rail-only static import doesn't
-    # include, by design - same as HU/AT/PL all being rail-scoped).
-    now = time.time()
-    if _DE_LIVE_CACHE["data"] is not None and now < _DE_LIVE_CACHE["expires"]:
-        return _DE_LIVE_CACHE["data"]
-
-    feed = fetch_de_feed()
-    raw_rows = parse_de_vehicles(feed)
-
-    conn = get_conn()
-    cur = conn.cursor()
-    resolved = resolve_de_delays(cur, raw_rows)
-    cur.close()
-    conn.close()
-
-    result = [
-        {
-            "route_name": row["route_name"],
-            "train_number": "",
-            "current_stop": row["station_name"],
-            "delay_minutes": row["delay_minutes"],
-            "status": "IN_TRANSIT_TO",
-            "stops": [],
-            "stop_idx": None,
-            "lat": None,
-            "lon": None,
-        }
-        for row in resolved
-    ]
-
-    _DE_LIVE_CACHE["data"] = result
-    _DE_LIVE_CACHE["expires"] = now + DE_LIVE_CACHE_TTL
-    return result
+    cached = _LIVE_CACHE.get(country)
+    if cached is not None and now < cached["expires"]:
+        return cached["data"]
+    data = fetch_fn()
+    _LIVE_CACHE[country] = {"data": data, "expires": now + ttl}
+    return data
 
 def get_live_hu():
     try:

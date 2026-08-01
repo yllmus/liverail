@@ -58,8 +58,7 @@ def test_live_at_mocks_radar_subprocess(monkeypatch):
         movements = json.load(f)
 
     monkeypatch.setattr(api, "call_radar", lambda: movements)
-    api._AT_LIVE_CACHE["data"] = None
-    api._AT_LIVE_CACHE["expires"] = 0
+    api._LIVE_CACHE.pop("AT", None)
 
     resp = client.get("/live?country=AT")
     assert resp.status_code == 200
@@ -80,8 +79,7 @@ def test_live_pl_mocks_gtfs_rt_fetch(monkeypatch):
     stu.arrival.time = 1785551442
 
     monkeypatch.setattr(api, "fetch_feed", lambda: feed)
-    api._PL_LIVE_CACHE["data"] = None
-    api._PL_LIVE_CACHE["expires"] = 0
+    api._LIVE_CACHE.pop("PL", None)
 
     # gtfs_trip_id "does-not-exist" won't resolve against real PL trips, so
     # resolve_delays() legitimately returns nothing - this only exercises
@@ -103,8 +101,7 @@ def test_live_de_mocks_gtfs_rt_fetch(monkeypatch):
     stu.arrival.delay = 60
 
     monkeypatch.setattr(api, "fetch_de_feed", lambda: feed)
-    api._DE_LIVE_CACHE["data"] = None
-    api._DE_LIVE_CACHE["expires"] = 0
+    api._LIVE_CACHE.pop("DE", None)
 
     # neither id resolves against real DE trips/stations, so resolve_delays()
     # legitimately returns nothing - this only exercises the
