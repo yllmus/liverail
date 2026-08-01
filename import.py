@@ -28,6 +28,14 @@ if not cur.fetchone():
 
 print(f"Importing stops for {country}...")
 stops = pd.read_csv(f"{gtfs_dir}/stops.txt", dtype=str)
+if (stops["location_type"] == "1").any():
+    # Feed uses GTFS's station/platform hierarchy (location_type=1 is a
+    # parent station; platforms/entrances/nodes are children pointing back
+    # via parent_station). Import only the stations, not every platform,
+    # or a single delay event would match and duplicate across all of a
+    # station's child rows. Feeds that don't use this convention at all
+    # (location_type always blank/0, e.g. MAV's) are left untouched.
+    stops = stops[stops["location_type"] == "1"]
 for _, row in stops.iterrows():
     cur.execute("""
         INSERT INTO stations (name, gtfs_stop_id, lat, lon, country_code)

@@ -1,7 +1,7 @@
 [
   {
     "tripId": "1|12345|0|86|20260801",
-    "line": { "name": "RJ 61" },
+    "line": { "name": "RJ 61", "mode": "train", "product": "national" },
     "direction": "Wien Hbf",
     "location": { "latitude": 48.185, "longitude": 16.375 },
     "nextStopovers": [
@@ -16,7 +16,7 @@
   },
   {
     "tripId": "1|54321|0|86|20260801",
-    "line": { "name": "S1" },
+    "line": { "name": "S1", "mode": "train", "product": "suburban" },
     "direction": "Floridsdorf",
     "location": { "latitude": 48.211, "longitude": 16.398 },
     "nextStopovers": [
@@ -31,9 +31,24 @@
   },
   {
     "tripId": "1|00000|0|86|20260801",
-    "line": { "name": "REX 7" },
+    "line": { "name": "REX 7", "mode": "train", "product": "regional" },
     "direction": "Nowhere",
     "location": { "latitude": 47.5, "longitude": 15.0 },
     "nextStopovers": []
+  },
+  {
+    "tripId": "1|99999|0|86|20260801",
+    "line": { "name": "Bus E3", "mode": "bus", "product": "bus" },
+    "direction": "Hütteldorf",
+    "location": { "latitude": 48.199, "longitude": 16.313 },
+    "nextStopovers": [
+      {
+        "stop": { "name": "Wien Breitensee" },
+        "arrival": "2026-08-01T09:20:00+02:00",
+        "arrivalDelay": 60,
+        "departure": "2026-08-01T09:21:00+02:00",
+        "departureDelay": 60
+      }
+    ]
   }
 ]

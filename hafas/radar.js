@@ -16,7 +16,10 @@ const bbox = {
 };
 
 try {
-  const movements = await client.radar(bbox, { results: 256, duration: 30 });
+  // client.radar() resolves to {movements: [...], realtimeDataUpdatedAt}.
+  // Only the array is written out — austria_poller.py's parse_at_vehicles()
+  // (and its test fixture) expect a bare list of vehicle movements.
+  const { movements } = await client.radar(bbox, { results: 256, duration: 30 });
   process.stdout.write(JSON.stringify(movements));
 } catch (err) {
   process.stderr.write(`radar.js failed: ${err.message}\n`);

@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import psycopg2
 from datetime import date
@@ -11,6 +12,31 @@ DB_CONFIG = {
 }
 
 COUNTRY_CODE = "AT"
+
+def station_name_candidates(name):
+    # ÖBB's live HAFAS names and its own static GTFS station names disagree
+    # on formatting for a meaningful chunk of stations: "Hbf" vs "Hauptbahnhof"
+    # (affects ~20 major-city main stations), a trailing " Bahnhof"/" Bahnhst"
+    # HAFAS sometimes adds that GTFS's station-level name doesn't have, and
+    # parenthetical platform/entrance qualifiers HAFAS appends (e.g.
+    # "Wien Hbf (Bahnsteige 3-12)"). Try the exact name first, then fall back
+    # to normalized variants rather than dropping the observation.
+    candidates = [name]
+    stripped = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
+    if stripped != name:
+        candidates.append(stripped)
+    for base in (name, stripped):
+        if base.endswith(" Hbf"):
+            candidates.append(base[: -len(" Hbf")] + " Hauptbahnhof")
+        candidates.append(re.sub(r"\s+(Bahnhof|Bahnhst)$", "", base))
+    # dedupe while preserving priority order (exact match first)
+    seen = set()
+    result = []
+    for c in candidates:
+        if c and c not in seen:
+            seen.add(c)
+            result.append(c)
+    return result
 
 def call_radar():
     result = subprocess.run(
@@ -26,6 +52,8 @@ def parse_at_vehicles(movements):
     rows = []
     for m in movements or []:
         line = m.get("line") or {}
+        if line.get("mode") != "train":
+            continue
         route_name = line.get("name")
         stopovers = m.get("nextStopovers") or []
         if not route_name or not stopovers:
@@ -59,8 +87,14 @@ def poll():
                 (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code)
             SELECT s.id, %s, NOW(), %s, false, %s, %s
             FROM stations s
-            WHERE s.name = %s AND s.country_code = %s
-        """, (date.today(), row["delay_minutes"], row["route_name"], COUNTRY_CODE, row["stop_name"], COUNTRY_CODE))
+            WHERE s.name = ANY(%s) AND s.country_code = %s
+            ORDER BY array_position(%s, s.name)
+            LIMIT 1
+        """, (
+            date.today(), row["delay_minutes"], row["route_name"], COUNTRY_CODE,
+            station_name_candidates(row["stop_name"]), COUNTRY_CODE,
+            station_name_candidates(row["stop_name"]),
+        ))
         count += 1
     conn.commit()
     cur.close()
