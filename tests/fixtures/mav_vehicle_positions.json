@@ -2,8 +2,11 @@
   "data": {
     "vehiclePositions": [
       {
+        "lat": 46.9061,
+        "lon": 19.6906,
         "trip": {
           "gtfsId": "HU:1:1234",
+          "tripHeadsign": "Szeged",
           "route": { "longName": "Budapest - Szeged" }
         },
         "stopRelationship": {
@@ -12,8 +15,11 @@
         "prevOrCurrentStop": { "arrivalDelay": 300, "departureDelay": 240 }
       },
       {
+        "lat": 47.1621,
+        "lon": 20.1826,
         "trip": {
           "gtfsId": "HU:1:9999",
+          "tripHeadsign": "Debrecen",
           "route": { "longName": "Budapest - Debrecen" }
         },
         "stopRelationship": {

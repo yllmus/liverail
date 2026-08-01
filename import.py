@@ -1,4 +1,5 @@
 import argparse
+import os
 import pandas as pd
 import psycopg2
 
@@ -72,25 +73,51 @@ for _, row in stops.iterrows():
 conn.commit()
 print(f"Imported {len(stops)} stops.")
 
+def _clean(v):
+    # pandas represents a blank CSV field as float NaN, not "", and NaN is
+    # truthy in Python — `v or fallback` never falls through, so a blank
+    # route_short_name silently wins over a real route_long_name.
+    return v if isinstance(v, str) and v.strip() else None
+
+# agency.txt is optional per feed (not every extracted gtfs_dir has one —
+# AT's/PL's don't, since only stops/routes/trips were pulled from their
+# zips) and agency is a route-level GTFS concept, not a trip-level one, so
+# this becomes routes.agency_name rather than anything on trips. Missing
+# file or missing agency_id just leaves agency_name NULL, same graceful-skip
+# convention as everything else here.
+agency_path = f"{gtfs_dir}/agency.txt"
+agency_names = {}
+if os.path.exists(agency_path):
+    agency = pd.read_csv(agency_path, dtype=str)
+    for _, row in agency.iterrows():
+        name = _clean(row.get("agency_name"))
+        if name and pd.notna(row.get("agency_id")):
+            agency_names[row["agency_id"]] = name
+
 print(f"Importing routes for {country}...")
 routes = pd.read_csv(f"{gtfs_dir}/routes.txt", dtype=str)
 for _, row in routes.iterrows():
+    name = _clean(row.get("route_short_name")) or _clean(row.get("route_long_name"))
+    agency_name = agency_names.get(row.get("agency_id"))
     cur.execute("""
-        INSERT INTO routes (name, gtfs_route_id, route_type, country_code)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (country_code, gtfs_route_id) DO NOTHING
-    """, (row.get("route_short_name") or row.get("route_long_name"), args.route_id_prefix + row["route_id"], row.get("route_type"), country))
+        INSERT INTO routes (name, gtfs_route_id, route_type, country_code, agency_name)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (country_code, gtfs_route_id) DO UPDATE SET
+            name = EXCLUDED.name, route_type = EXCLUDED.route_type, agency_name = EXCLUDED.agency_name
+    """, (name, args.route_id_prefix + row["route_id"], row.get("route_type"), country, agency_name))
 conn.commit()
 print(f"Imported {len(routes)} routes.")
 
 print(f"Importing trips for {country}...")
 trips = pd.read_csv(f"{gtfs_dir}/trips.txt", dtype=str)
 for _, row in trips.iterrows():
+    headsign = _clean(row.get("trip_headsign"))
     cur.execute("""
-        INSERT INTO trips (route_id, gtfs_trip_id, country_code)
-        SELECT r.id, %s, %s FROM routes r WHERE r.gtfs_route_id = %s AND r.country_code = %s
-        ON CONFLICT (country_code, gtfs_trip_id) DO NOTHING
-    """, (row["trip_id"], country, args.route_id_prefix + row["route_id"], country))
+        INSERT INTO trips (route_id, gtfs_trip_id, country_code, headsign)
+        SELECT r.id, %s, %s, %s FROM routes r WHERE r.gtfs_route_id = %s AND r.country_code = %s
+        ON CONFLICT (country_code, gtfs_trip_id) DO UPDATE SET
+            headsign = EXCLUDED.headsign, route_id = EXCLUDED.route_id
+    """, (row["trip_id"], country, headsign, args.route_id_prefix + row["route_id"], country))
 conn.commit()
 print(f"Imported {len(trips)} trips.")
 

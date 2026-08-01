@@ -290,6 +290,7 @@ GRAPHQL_QUERY = """
     lon
     trip {
       tripShortName
+      tripHeadsign
       route { longName }
       stoptimes { stop { name } scheduledDeparture departureDelay }
     }
@@ -315,17 +316,24 @@ def _fmt_time(sec):
 _LIVE_CACHE = {}  # country_code -> {"data": [...], "expires": epoch}
 
 def _live_result(rows, stop_key):
+    # headsign/lat/lon are populated for AT (HAFAS radar's direction/location,
+    # both confirmed ~100% filled in real data) and headsign-only for PL (via
+    # the trips.headsign static join in resolve_delays); DE's underlying rows
+    # carry neither (no headsign in gtfs.de's static feed, no position in a
+    # TripUpdates-only stream) so .get() falls through to None for it, same
+    # as before this existed.
     return [
         {
             "route_name": row["route_name"],
-            "train_number": "",
+            "train_number": row.get("train_number") or "",
+            "headsign": row.get("headsign"),
             "current_stop": row[stop_key],
             "delay_minutes": row["delay_minutes"],
             "status": "IN_TRANSIT_TO",
             "stops": [],
             "stop_idx": None,
-            "lat": None,
-            "lon": None,
+            "lat": row.get("lat"),
+            "lon": row.get("lon"),
         }
         for row in rows
     ]
@@ -420,6 +428,7 @@ def get_live_hu():
         result.append({
             "route_name": route_name,
             "train_number": trip.get("tripShortName") or "",
+            "headsign": trip.get("tripHeadsign"),
             "current_stop": stop_name,
             "delay_minutes": round(delay_sec / 60, 1),
             "status": stop_rel.get("status") or "IN_TRANSIT_TO",

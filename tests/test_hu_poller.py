@@ -16,6 +16,9 @@ def test_parse_vehicles_extracts_rows_with_delay():
         "stop_name": "Kecskemet",
         "route_name": "Budapest - Szeged",
         "delay_minutes": 5.0,
+        "headsign": "Szeged",
+        "lat": 46.9061,
+        "lon": 19.6906,
     }
 
 def test_parse_vehicles_falls_back_to_departure_delay():

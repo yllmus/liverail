@@ -86,7 +86,7 @@ def test_resolve_delays_computes_delay_from_scheduled_and_actual():
     # station_id=42, scheduled_arrival="09:59:00" (2026-08-01, Warsaw),
     # actual arrival 60s later than scheduled
     scheduled = _scheduled_epoch("20260801", "09:59:00")
-    cur = _FakeCursor((42, "09:59:00", None, "Warszawa Centralna", "IC 1"))
+    cur = _FakeCursor((42, "09:59:00", None, "Warszawa Centralna", "IC 1", "Kraków Główny"))
     rows = [{
         "gtfs_trip_id": "T1", "start_date": "20260801",
         "stop_sequence": 3, "actual_epoch": scheduled + 60,
@@ -96,6 +96,7 @@ def test_resolve_delays_computes_delay_from_scheduled_and_actual():
     assert resolved[0]["station_id"] == 42
     assert resolved[0]["station_name"] == "Warszawa Centralna"
     assert resolved[0]["route_name"] == "IC 1"
+    assert resolved[0]["headsign"] == "Kraków Główny"
     assert resolved[0]["delay_minutes"] == 1.0
 
 def test_resolve_delays_skips_unmatched_trips():

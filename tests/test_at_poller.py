@@ -16,6 +16,9 @@ def test_parse_at_vehicles_extracts_rows_with_delay():
         "stop_name": "Wien Meidling",
         "route_name": "RJ 61",
         "delay_minutes": 3.0,
+        "headsign": "Wien Hbf",
+        "lat": 48.185,
+        "lon": 16.375,
     }
 
 def test_parse_at_vehicles_falls_back_to_departure_delay():

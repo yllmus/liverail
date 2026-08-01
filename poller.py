@@ -20,7 +20,9 @@ QUERY = """
     neLat: 48.6, neLon: 22.9,
     modes: [RAIL, RAIL_REPLACEMENT_BUS, SUBURBAN_RAILWAY, TRAMTRAIN]
   ) {
-    trip { gtfsId route { longName } }
+    lat
+    lon
+    trip { gtfsId tripHeadsign route { longName } }
     stopRelationship { stop { gtfsId name } }
     prevOrCurrentStop { arrivalDelay departureDelay }
   }
@@ -45,6 +47,16 @@ def parse_vehicles(data):
             "stop_name": stop_name,
             "route_name": route_name,
             "delay_minutes": round(delay_seconds / 60, 2),
+            # Destination text and live coordinates — both come straight off
+            # this same GraphQL response but were being discarded before;
+            # confirmed present on the real endpoint (tripHeadsign, lat/lon)
+            # before wiring them in. Either can legitimately be missing
+            # (some entries don't carry a headsign) so these stay nullable,
+            # unlike stop_name/route_name/delay_minutes which gate inclusion
+            # above.
+            "headsign": trip.get("tripHeadsign"),
+            "lat": v.get("lat"),
+            "lon": v.get("lon"),
         })
     return rows
 
@@ -63,11 +75,14 @@ def poll():
         print(f"  {row['route_name']} at {row['stop_name']}: {row['delay_minutes']}")
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code)
-            SELECT s.id, %s, NOW(), %s, false, %s, %s
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon)
+            SELECT s.id, %s, NOW(), %s, false, %s, %s, %s, %s, %s
             FROM stations s
             WHERE s.name = %s AND s.country_code = %s
-        """, (date.today(), row["delay_minutes"], row["route_name"], COUNTRY_CODE, row["stop_name"], COUNTRY_CODE))
+        """, (
+            date.today(), row["delay_minutes"], row["route_name"], COUNTRY_CODE,
+            row["headsign"], row["lat"], row["lon"], row["stop_name"], COUNTRY_CODE,
+        ))
         count += 1
     conn.commit()
     cur.close()

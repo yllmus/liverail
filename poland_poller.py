@@ -84,7 +84,7 @@ def resolve_delays(cur, rows):
     for row in rows:
         cur.execute("""
             SELECT st.station_id, st.scheduled_arrival, st.scheduled_departure,
-                   s.name, r.name
+                   s.name, r.name, t.headsign
             FROM trips t
             JOIN stop_times st ON st.trip_id = t.id AND st.stop_sequence = %s
             JOIN stations s ON s.id = st.station_id
@@ -94,7 +94,7 @@ def resolve_delays(cur, rows):
         match = cur.fetchone()
         if not match:
             continue
-        station_id, sched_arrival, sched_departure, station_name, route_name = match
+        station_id, sched_arrival, sched_departure, station_name, route_name, headsign = match
         scheduled_epoch = _scheduled_epoch(row["start_date"], sched_arrival or sched_departure)
         if scheduled_epoch is None:
             continue
@@ -102,6 +102,7 @@ def resolve_delays(cur, rows):
             "station_id": station_id,
             "station_name": station_name,
             "route_name": route_name,
+            "headsign": headsign,
             "delay_minutes": round((row["actual_epoch"] - scheduled_epoch) / 60, 2),
         })
     return resolved
@@ -120,9 +121,9 @@ def poll():
         print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code)
-            VALUES (%s, CURRENT_DATE, NOW(), %s, false, %s, %s)
-        """, (row["station_id"], row["delay_minutes"], row["route_name"], COUNTRY_CODE))
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign)
+            VALUES (%s, CURRENT_DATE, NOW(), %s, false, %s, %s, %s)
+        """, (row["station_id"], row["delay_minutes"], row["route_name"], COUNTRY_CODE, row["headsign"]))
         count += 1
     conn.commit()
     cur.close()

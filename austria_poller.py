@@ -65,10 +65,19 @@ def parse_at_vehicles(movements):
             delay_seconds = stop.get("departureDelay")
         if not stop_name or delay_seconds is None:
             continue
+        location = m.get("location") or {}
         rows.append({
             "stop_name": stop_name,
             "route_name": route_name,
             "delay_minutes": round(delay_seconds / 60, 2),
+            # HAFAS's radar movements already carry a destination string
+            # (direction) and a live vehicle coordinate (location) - both
+            # confirmed 100% filled across a real sample of 122 train
+            # movements - but were being discarded before this. Nullable
+            # here regardless, same convention as HU's headsign/lat/lon.
+            "headsign": m.get("direction"),
+            "lat": location.get("latitude"),
+            "lon": location.get("longitude"),
         })
     return rows
 
@@ -84,14 +93,15 @@ def poll():
         print(f"  {row['route_name']} at {row['stop_name']}: {row['delay_minutes']}")
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code)
-            SELECT s.id, %s, NOW(), %s, false, %s, %s
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon)
+            SELECT s.id, %s, NOW(), %s, false, %s, %s, %s, %s, %s
             FROM stations s
             WHERE s.name = ANY(%s) AND s.country_code = %s
             ORDER BY array_position(%s, s.name)
             LIMIT 1
         """, (
             date.today(), row["delay_minutes"], row["route_name"], COUNTRY_CODE,
+            row["headsign"], row["lat"], row["lon"],
             station_name_candidates(row["stop_name"]), COUNTRY_CODE,
             station_name_candidates(row["stop_name"]),
         ))
