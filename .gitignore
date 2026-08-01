@@ -1,0 +1,17 @@
+# This repo is the home directory for the Hungarian Train Delay Tracker
+# project, but the home directory also holds unrelated side projects,
+# caches, logs, DB backups, and dotfiles (.ssh, shell
+# history, editor session data, etc). To avoid ever accidentally
+# committing secrets or multi-hundred-MB unrelated data, this .gitignore
+# denies everything by default and explicitly un-ignores only the
+# train-delay-tracker's own source files. New project files need an
+# explicit "!" entry added below before `git add` will pick them up.
+
+*
+
+!.gitignore
+!api.py
+!import.py
+!poller.py
+!index.html
+!insights.sql
