@@ -48,11 +48,21 @@ def get_countries():
 def get_stations(country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT DISTINCT name FROM stations WHERE country_code = %s ORDER BY name", (country,))
+    # display_name IS NOT NULL excludes confirmed non-rail stops (see
+    # station_names.py's clean_display_name) - name stays the matching key
+    # for /station/{name}/... lookups, display_name is for showing to a
+    # rider. Not called anywhere in the current frontend, so this response
+    # shape is free to change (see /stations/summary below for the
+    # endpoint that isn't).
+    cur.execute("""
+        SELECT DISTINCT name, display_name FROM stations
+        WHERE country_code = %s AND display_name IS NOT NULL
+        ORDER BY display_name
+    """, (country,))
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [r["name"] for r in rows]
+    return [{"name": r["name"], "display_name": r["display_name"]} for r in rows]
 
 @app.get("/station/{station_name}/delays")
 def get_station_delays(station_name: str, country: str = "HU"):
@@ -232,15 +242,21 @@ def get_heatmap(station: str = None, route: str = None, country: str = "HU"):
 def get_stations_summary(country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    # station_name stays s.name (the live click-through lookup key index.html
+    # passes straight into /station/{name}/stats) - display_name is added
+    # additively for a rider-facing label, never substituted in. The
+    # display_name IS NOT NULL filter is a real, live-facing improvement:
+    # it keeps confirmed non-rail stops (e.g. DE's Bushaltestelle rows) off
+    # this leaderboard if they ever cross the 20-observation threshold.
     cur.execute("""
-        SELECT s.name as station_name,
+        SELECT s.name as station_name, s.display_name,
                COUNT(*) as total,
                ROUND(100.0 * SUM(CASE WHEN o.delay_minutes <= 2 THEN 1 ELSE 0 END) / COUNT(*)::numeric, 1) as pct_on_time,
                ROUND(AVG(o.delay_minutes)::numeric, 1) as avg_delay
         FROM delay_observations o
         JOIN stations s ON o.station_id = s.id
-        WHERE o.country_code = %s
-        GROUP BY s.name
+        WHERE o.country_code = %s AND s.display_name IS NOT NULL
+        GROUP BY s.name, s.display_name
         HAVING COUNT(*) >= 20
         ORDER BY pct_on_time DESC
     """, (country,))

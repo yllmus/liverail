@@ -3,6 +3,8 @@ import os
 import pandas as pd
 import psycopg2
 
+from station_names import clean_display_name
+
 DB_CONFIG = {
     "dbname": "train_delay_db",
     "user": "trainuser",
@@ -36,12 +38,54 @@ parser.add_argument("--route-id-prefix", default="", help=(
     "saw first and mis-map every trip referencing the id from the other "
     "feed. Default '' keeps HU/AT/PL (each single-feed) unaffected."
 ))
+parser.add_argument("--backfill-display-names", action="store_true", help=(
+    "One-time (but safe to re-run) backfill: compute stations.display_name "
+    "for existing rows via station_names.clean_display_name(). Pure DB "
+    "operation, no GTFS files touched - ignores --gtfs-dir/--with-stop-times/"
+    "--route-id-prefix entirely. Scope with --backfill-country to run one "
+    "country at a time; omit it to cover all countries in the countries table."
+))
+parser.add_argument("--backfill-country", default=None, help=(
+    "Restrict --backfill-display-names to a single country code. Only "
+    "meaningful together with --backfill-display-names."
+))
 args = parser.parse_args()
 country = args.country.upper()
 gtfs_dir = args.gtfs_dir
 
 conn = psycopg2.connect(**DB_CONFIG)
 cur = conn.cursor()
+
+if args.backfill_display_names:
+    codes = [args.backfill_country.upper()] if args.backfill_country else None
+    if codes is None:
+        cur.execute("SELECT code FROM countries ORDER BY code")
+        codes = [r[0] for r in cur.fetchall()]
+    grand_total = grand_set = grand_null = grand_unchanged = 0
+    for code in codes:
+        cur.execute("SELECT id, name FROM stations WHERE country_code = %s", (code,))
+        rows = cur.fetchall()
+        set_count = null_count = unchanged_count = 0
+        for station_id, name in rows:
+            dn = clean_display_name(name, code)
+            cur.execute("UPDATE stations SET display_name = %s WHERE id = %s", (dn, station_id))
+            if dn is None:
+                null_count += 1
+            elif dn == name:
+                unchanged_count += 1
+            else:
+                set_count += 1
+        conn.commit()
+        print(f"{code}: {len(rows)} stations - {set_count} cleaned, "
+              f"{unchanged_count} unchanged (already clean), "
+              f"{null_count} filtered to NULL (non-rail)")
+        grand_total += len(rows); grand_set += set_count
+        grand_null += null_count; grand_unchanged += unchanged_count
+    print(f"TOTAL: {grand_total} stations - {grand_set} cleaned, "
+          f"{grand_unchanged} unchanged, {grand_null} filtered")
+    cur.close()
+    conn.close()
+    raise SystemExit(0)
 
 cur.execute("SELECT 1 FROM countries WHERE code = %s", (country,))
 if not cur.fetchone():
@@ -81,10 +125,11 @@ if "parent_station" in stops.columns:
     stops = stops[stops["parent_station"].isna() | (stops["parent_station"].str.strip() == "")]
 for _, row in stops.iterrows():
     cur.execute("""
-        INSERT INTO stations (name, gtfs_stop_id, lat, lon, country_code)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO stations (name, gtfs_stop_id, lat, lon, country_code, display_name)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (country_code, gtfs_stop_id) DO NOTHING
-    """, (row["stop_name"], row["stop_id"], row.get("stop_lat"), row.get("stop_lon"), country))
+    """, (row["stop_name"], row["stop_id"], row.get("stop_lat"), row.get("stop_lon"), country,
+          clean_display_name(row["stop_name"], country)))
 conn.commit()
 print(f"Imported {len(stops)} stops.")
 
@@ -92,7 +137,14 @@ def _clean(v):
     # pandas represents a blank CSV field as float NaN, not "", and NaN is
     # truthy in Python — `v or fallback` never falls through, so a blank
     # route_short_name silently wins over a real route_long_name.
-    return v if isinstance(v, str) and v.strip() else None
+    #
+    # Second, separate bug fixed here: this used to check v.strip() for
+    # truthiness but return the *unstripped* v, so a non-blank value with
+    # stray whitespace (e.g. "[Pótló 41011 ]") passed through untouched —
+    # 4248/11132 (38%) of HU routes.name carried a trailing space because
+    # of this. Returning v.strip() fixes it; re-running import.py backfills
+    # existing rows since routes/trips upsert with ON CONFLICT DO UPDATE.
+    return v.strip() if isinstance(v, str) and v.strip() else None
 
 # agency.txt is optional per feed (not every extracted gtfs_dir has one —
 # AT's/PL's don't, since only stops/routes/trips were pulled from their
