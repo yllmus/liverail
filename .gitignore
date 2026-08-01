@@ -15,3 +15,15 @@
 !poller.py
 !index.html
 !insights.sql
+!austria_poller.py
+!hafas/
+!hafas/package.json
+!hafas/radar.js
+!requirements.txt
+!tests/
+!tests/fixtures/
+!tests/fixtures/mav_vehicle_positions.json
+!tests/fixtures/oebb_radar.json
+!tests/test_hu_poller.py
+!tests/test_at_poller.py
+!tests/test_api.py

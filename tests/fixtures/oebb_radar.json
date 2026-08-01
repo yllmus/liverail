@@ -1,0 +1,39 @@
+[
+  {
+    "tripId": "1|12345|0|86|20260801",
+    "line": { "name": "RJ 61" },
+    "direction": "Wien Hbf",
+    "location": { "latitude": 48.185, "longitude": 16.375 },
+    "nextStopovers": [
+      {
+        "stop": { "name": "Wien Meidling" },
+        "arrival": "2026-08-01T09:12:00+02:00",
+        "arrivalDelay": 180,
+        "departure": "2026-08-01T09:13:00+02:00",
+        "departureDelay": 180
+      }
+    ]
+  },
+  {
+    "tripId": "1|54321|0|86|20260801",
+    "line": { "name": "S1" },
+    "direction": "Floridsdorf",
+    "location": { "latitude": 48.211, "longitude": 16.398 },
+    "nextStopovers": [
+      {
+        "stop": { "name": "Wien Praterstern" },
+        "arrival": null,
+        "arrivalDelay": null,
+        "departure": "2026-08-01T09:15:00+02:00",
+        "departureDelay": 60
+      }
+    ]
+  },
+  {
+    "tripId": "1|00000|0|86|20260801",
+    "line": { "name": "REX 7" },
+    "direction": "Nowhere",
+    "location": { "latitude": 47.5, "longitude": 15.0 },
+    "nextStopovers": []
+  }
+]

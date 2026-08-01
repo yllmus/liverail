@@ -1,0 +1,34 @@
+{
+  "data": {
+    "vehiclePositions": [
+      {
+        "trip": {
+          "gtfsId": "HU:1:1234",
+          "route": { "longName": "Budapest - Szeged" }
+        },
+        "stopRelationship": {
+          "stop": { "gtfsId": "HU:1:5678", "name": "Kecskemet" }
+        },
+        "prevOrCurrentStop": { "arrivalDelay": 300, "departureDelay": 240 }
+      },
+      {
+        "trip": {
+          "gtfsId": "HU:1:9999",
+          "route": { "longName": "Budapest - Debrecen" }
+        },
+        "stopRelationship": {
+          "stop": { "gtfsId": "HU:1:1111", "name": "Szolnok" }
+        },
+        "prevOrCurrentStop": { "arrivalDelay": null, "departureDelay": 60 }
+      },
+      {
+        "trip": {
+          "gtfsId": "HU:1:0000",
+          "route": { "longName": "Missing stop data" }
+        },
+        "stopRelationship": null,
+        "prevOrCurrentStop": { "arrivalDelay": 120 }
+      }
+    ]
+  }
+}

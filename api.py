@@ -3,7 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 import psycopg2.extras
 import requests as req
+import time
 from datetime import datetime, timedelta
+from austria_poller import call_radar, parse_at_vehicles
 
 app = FastAPI()
 
@@ -24,6 +26,10 @@ DB_CONFIG = {
 def get_conn():
     return psycopg2.connect(**DB_CONFIG)
 
+COUNTRY_ATTRIBUTION = {
+    "AT": "Data: ÖBB (data.oebb.at), CC BY 4.0",
+}
+
 @app.get("/countries")
 def get_countries():
     conn = get_conn()
@@ -32,20 +38,20 @@ def get_countries():
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [dict(r) for r in rows]
+    return [{**dict(r), "attribution": COUNTRY_ATTRIBUTION.get(r["code"])} for r in rows]
 
 @app.get("/stations")
-def get_stations():
+def get_stations(country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT DISTINCT name FROM stations ORDER BY name")
+    cur.execute("SELECT DISTINCT name FROM stations WHERE country_code = %s ORDER BY name", (country,))
     rows = cur.fetchall()
     cur.close()
     conn.close()
     return [r["name"] for r in rows]
 
 @app.get("/station/{station_name}/delays")
-def get_station_delays(station_name: str):
+def get_station_delays(station_name: str, country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -56,25 +62,29 @@ def get_station_delays(station_name: str):
             ROUND(100.0 * SUM(CASE WHEN delay_minutes > 2 THEN 1 ELSE 0 END) / COUNT(*)::numeric, 1) as pct_late
         FROM delay_observations o
         JOIN stations s ON o.station_id = s.id
-        WHERE s.name = %s
-    """, (station_name,))
+        WHERE s.name = %s AND o.country_code = %s
+    """, (station_name, country))
     row = cur.fetchone()
     cur.close()
     conn.close()
     return row
 
 @app.get("/routes")
-def get_routes():
+def get_routes(country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT DISTINCT route_name FROM delay_observations WHERE route_name IS NOT NULL ORDER BY route_name")
+    cur.execute("""
+        SELECT DISTINCT route_name FROM delay_observations
+        WHERE route_name IS NOT NULL AND country_code = %s
+        ORDER BY route_name
+    """, (country,))
     rows = cur.fetchall()
     cur.close()
     conn.close()
     return [r["route_name"] for r in rows]
 
 @app.get("/routes/summary")
-def get_routes_summary():
+def get_routes_summary(country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -84,18 +94,18 @@ def get_routes_summary():
             ROUND(100.0 * SUM(CASE WHEN delay_minutes <= 2 THEN 1 ELSE 0 END) / COUNT(*)::numeric, 1) as pct_on_time,
             ROUND(AVG(delay_minutes)::numeric, 1) as avg_delay
         FROM delay_observations
-        WHERE route_name IS NOT NULL
+        WHERE route_name IS NOT NULL AND country_code = %s
         GROUP BY route_name
         HAVING COUNT(*) >= 5
         ORDER BY pct_on_time DESC
-    """)
+    """, (country,))
     rows = cur.fetchall()
     cur.close()
     conn.close()
     return [dict(r) for r in rows]
 
 @app.get("/route/{route_name}/delays")
-def get_route_delays(route_name: str):
+def get_route_delays(route_name: str, country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -105,15 +115,15 @@ def get_route_delays(route_name: str):
             ROUND(MAX(delay_minutes)::numeric, 2) as max_delay,
             ROUND(100.0 * SUM(CASE WHEN delay_minutes > 2 THEN 1 ELSE 0 END) / COUNT(*)::numeric, 1) as pct_late
         FROM delay_observations
-        WHERE route_name = %s
-    """, (route_name,))
+        WHERE route_name = %s AND country_code = %s
+    """, (route_name, country))
     row = cur.fetchone()
     cur.close()
     conn.close()
     return row
 
 @app.get("/route/{route_name}/stats")
-def get_route_stats(route_name: str):
+def get_route_stats(route_name: str, country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -122,32 +132,32 @@ def get_route_stats(route_name: str):
             ROUND(100.0 * SUM(CASE WHEN delay_minutes <= 2 THEN 1 ELSE 0 END) / COUNT(*)::numeric, 1) as pct_on_time,
             ROUND(AVG(delay_minutes)::numeric, 2) as avg_delay
         FROM delay_observations
-        WHERE route_name = %s
-    """, (route_name,))
+        WHERE route_name = %s AND country_code = %s
+    """, (route_name, country))
     summary = cur.fetchone()
     cur.execute("""
         SELECT EXTRACT(HOUR FROM actual_arrival)::int as hour,
                COUNT(*) as total,
                ROUND(AVG(delay_minutes)::numeric, 1) as avg_delay
         FROM delay_observations
-        WHERE route_name = %s AND actual_arrival IS NOT NULL
+        WHERE route_name = %s AND country_code = %s AND actual_arrival IS NOT NULL
         GROUP BY hour ORDER BY hour
-    """, (route_name,))
+    """, (route_name, country))
     by_hour = [dict(r) for r in cur.fetchall()]
     cur.execute("""
         SELECT EXTRACT(DOW FROM actual_arrival)::int as dow,
                COUNT(*) as total,
                ROUND(AVG(delay_minutes)::numeric, 1) as avg_delay
         FROM delay_observations
-        WHERE route_name = %s AND actual_arrival IS NOT NULL
+        WHERE route_name = %s AND country_code = %s AND actual_arrival IS NOT NULL
         GROUP BY dow ORDER BY dow
-    """, (route_name,))
+    """, (route_name, country))
     by_dow = [dict(r) for r in cur.fetchall()]
     cur.close(); conn.close()
     return {**dict(summary), "by_hour": by_hour, "by_dow": by_dow}
 
 @app.get("/station/{station_name}/stats")
-def get_station_stats(station_name: str):
+def get_station_stats(station_name: str, country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -157,8 +167,8 @@ def get_station_stats(station_name: str):
             ROUND(AVG(delay_minutes)::numeric, 2) as avg_delay
         FROM delay_observations o
         JOIN stations s ON o.station_id = s.id
-        WHERE s.name = %s
-    """, (station_name,))
+        WHERE s.name = %s AND o.country_code = %s
+    """, (station_name, country))
     summary = cur.fetchone()
     cur.execute("""
         SELECT EXTRACT(HOUR FROM actual_arrival)::int as hour,
@@ -166,9 +176,9 @@ def get_station_stats(station_name: str):
                ROUND(AVG(delay_minutes)::numeric, 1) as avg_delay
         FROM delay_observations o
         JOIN stations s ON o.station_id = s.id
-        WHERE s.name = %s AND actual_arrival IS NOT NULL
+        WHERE s.name = %s AND o.country_code = %s AND actual_arrival IS NOT NULL
         GROUP BY hour ORDER BY hour
-    """, (station_name,))
+    """, (station_name, country))
     by_hour = [dict(r) for r in cur.fetchall()]
     cur.execute("""
         SELECT EXTRACT(DOW FROM actual_arrival)::int as dow,
@@ -176,15 +186,15 @@ def get_station_stats(station_name: str):
                ROUND(AVG(delay_minutes)::numeric, 1) as avg_delay
         FROM delay_observations o
         JOIN stations s ON o.station_id = s.id
-        WHERE s.name = %s AND actual_arrival IS NOT NULL
+        WHERE s.name = %s AND o.country_code = %s AND actual_arrival IS NOT NULL
         GROUP BY dow ORDER BY dow
-    """, (station_name,))
+    """, (station_name, country))
     by_dow = [dict(r) for r in cur.fetchall()]
     cur.close(); conn.close()
     return {**dict(summary), "by_hour": by_hour, "by_dow": by_dow}
 
 @app.get("/heatmap")
-def get_heatmap(station: str = None, route: str = None):
+def get_heatmap(station: str = None, route: str = None, country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     if station:
@@ -195,9 +205,9 @@ def get_heatmap(station: str = None, route: str = None):
                    ROUND(AVG(delay_minutes)::numeric,1) as avg_delay
             FROM delay_observations o
             JOIN stations s ON o.station_id=s.id
-            WHERE s.name=%s AND actual_arrival IS NOT NULL
+            WHERE s.name=%s AND o.country_code = %s AND actual_arrival IS NOT NULL
             GROUP BY dow,hour ORDER BY dow,hour
-        """, (station,))
+        """, (station, country))
     elif route:
         cur.execute("""
             SELECT EXTRACT(DOW FROM actual_arrival)::int as dow,
@@ -205,9 +215,9 @@ def get_heatmap(station: str = None, route: str = None):
                    COUNT(*) as total,
                    ROUND(AVG(delay_minutes)::numeric,1) as avg_delay
             FROM delay_observations
-            WHERE route_name=%s AND actual_arrival IS NOT NULL
+            WHERE route_name=%s AND country_code = %s AND actual_arrival IS NOT NULL
             GROUP BY dow,hour ORDER BY dow,hour
-        """, (route,))
+        """, (route, country))
     else:
         cur.close(); conn.close(); return []
     rows = cur.fetchall()
@@ -215,7 +225,7 @@ def get_heatmap(station: str = None, route: str = None):
     return [dict(r) for r in rows]
 
 @app.get("/stations/summary")
-def get_stations_summary():
+def get_stations_summary(country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -225,16 +235,17 @@ def get_stations_summary():
                ROUND(AVG(o.delay_minutes)::numeric, 1) as avg_delay
         FROM delay_observations o
         JOIN stations s ON o.station_id = s.id
+        WHERE o.country_code = %s
         GROUP BY s.name
         HAVING COUNT(*) >= 20
         ORDER BY pct_on_time DESC
-    """)
+    """, (country,))
     rows = cur.fetchall()
     cur.close(); conn.close()
     return [dict(r) for r in rows]
 
 @app.get("/trend")
-def get_trend(route: str = None, station: str = None, days: int = 30):
+def get_trend(route: str = None, station: str = None, days: int = 30, country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cutoff = datetime.now() - timedelta(days=days)
@@ -244,9 +255,9 @@ def get_trend(route: str = None, station: str = None, days: int = 30):
                    ROUND(AVG(delay_minutes)::numeric, 1) as avg_delay,
                    COUNT(*) as total
             FROM delay_observations
-            WHERE route_name = %s AND actual_arrival >= %s
+            WHERE route_name = %s AND country_code = %s AND actual_arrival >= %s
             GROUP BY day ORDER BY day
-        """, (route, cutoff))
+        """, (route, country, cutoff))
     elif station:
         cur.execute("""
             SELECT DATE(o.actual_arrival) as day,
@@ -254,9 +265,9 @@ def get_trend(route: str = None, station: str = None, days: int = 30):
                    COUNT(*) as total
             FROM delay_observations o
             JOIN stations s ON o.station_id = s.id
-            WHERE s.name = %s AND o.actual_arrival >= %s
+            WHERE s.name = %s AND o.country_code = %s AND o.actual_arrival >= %s
             GROUP BY day ORDER BY day
-        """, (station, cutoff))
+        """, (station, country, cutoff))
     else:
         cur.close(); conn.close(); return []
     rows = cur.fetchall()
@@ -292,7 +303,39 @@ def _fmt_time(sec):
     return f"{h:02d}:{m:02d}"
 
 @app.get("/live")
-def get_live():
+def get_live(country: str = "HU"):
+    if country == "AT":
+        return get_live_at()
+    return get_live_hu()
+
+_AT_LIVE_CACHE = {"data": None, "expires": 0}
+AT_LIVE_CACHE_TTL = 25
+
+def get_live_at():
+    now = time.time()
+    if _AT_LIVE_CACHE["data"] is not None and now < _AT_LIVE_CACHE["expires"]:
+        return _AT_LIVE_CACHE["data"]
+
+    movements = call_radar()
+    result = [
+        {
+            "route_name": row["route_name"],
+            "train_number": "",
+            "current_stop": row["stop_name"],
+            "delay_minutes": row["delay_minutes"],
+            "status": "IN_TRANSIT_TO",
+            "stops": [],
+            "stop_idx": None,
+            "lat": None,
+            "lon": None,
+        }
+        for row in parse_at_vehicles(movements)
+    ]
+    _AT_LIVE_CACHE["data"] = result
+    _AT_LIVE_CACHE["expires"] = now + AT_LIVE_CACHE_TTL
+    return result
+
+def get_live_hu():
     try:
         resp = req.post(GRAPHQL_URL, json={"query": GRAPHQL_QUERY}, timeout=20)
         vehicles = resp.json().get("data", {}).get("vehiclePositions", [])
