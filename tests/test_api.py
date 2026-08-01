@@ -91,3 +91,26 @@ def test_live_pl_mocks_gtfs_rt_fetch(monkeypatch):
     resp = client.get("/live?country=PL")
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
+
+def test_live_de_mocks_gtfs_rt_fetch(monkeypatch):
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.header.gtfs_realtime_version = "2.0"
+    e = feed.entity.add()
+    e.id = "1"
+    e.trip_update.trip.trip_id = "does-not-exist"
+    stu = e.trip_update.stop_time_update.add()
+    stu.stop_id = "does-not-exist-either"
+    stu.arrival.delay = 60
+
+    monkeypatch.setattr(api, "fetch_de_feed", lambda: feed)
+    api._DE_LIVE_CACHE["data"] = None
+    api._DE_LIVE_CACHE["expires"] = 0
+
+    # neither id resolves against real DE trips/stations, so resolve_delays()
+    # legitimately returns nothing - this only exercises the
+    # fetch/parse/resolve/dispatch path end to end, real DB included (real
+    # DE stops/routes/trips are imported as of this test running), same as
+    # the PL smoke test above.
+    resp = client.get("/live?country=DE")
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)

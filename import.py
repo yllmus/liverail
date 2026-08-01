@@ -19,6 +19,22 @@ parser.add_argument("--with-stop-times", action="store_true", help=(
     "only exposes stop_sequence + absolute times, no stop_id/delay) need "
     "scheduled stop_times to resolve stations and compute delay."
 ))
+parser.add_argument("--route-id-prefix", default="", help=(
+    "Prefix applied to gtfs_route_id on insert and on the trips->routes "
+    "lookup (stops/trips ids are left alone). Needed when a single country "
+    "is assembled from more than one GTFS extract whose route_id values "
+    "were independently assigned and can collide: Germany's gtfs.de feed "
+    "ships long-distance (fv_free) and regional (rv_free) rail as separate "
+    "zips, and confirmed against the real data, their route_id namespaces "
+    "are NOT shared - the same small integer names a different route in "
+    "each file (e.g. route_id 10 is 'RJ' in fv_free but 'RE6' in rv_free), "
+    "unlike stop_id and trip_id, which genuinely are shared/global across "
+    "both files (verified: all 830 overlapping stop_ids agree on name). "
+    "Importing both feeds into country_code='DE' without this would let "
+    "ON CONFLICT DO NOTHING silently keep whichever route a colliding id "
+    "saw first and mis-map every trip referencing the id from the other "
+    "feed. Default '' keeps HU/AT/PL (each single-feed) unaffected."
+))
 args = parser.parse_args()
 country = args.country.upper()
 gtfs_dir = args.gtfs_dir
@@ -63,7 +79,7 @@ for _, row in routes.iterrows():
         INSERT INTO routes (name, gtfs_route_id, route_type, country_code)
         VALUES (%s, %s, %s, %s)
         ON CONFLICT (country_code, gtfs_route_id) DO NOTHING
-    """, (row.get("route_short_name") or row.get("route_long_name"), row["route_id"], row.get("route_type"), country))
+    """, (row.get("route_short_name") or row.get("route_long_name"), args.route_id_prefix + row["route_id"], row.get("route_type"), country))
 conn.commit()
 print(f"Imported {len(routes)} routes.")
 
@@ -74,7 +90,7 @@ for _, row in trips.iterrows():
         INSERT INTO trips (route_id, gtfs_trip_id, country_code)
         SELECT r.id, %s, %s FROM routes r WHERE r.gtfs_route_id = %s AND r.country_code = %s
         ON CONFLICT (country_code, gtfs_trip_id) DO NOTHING
-    """, (row["trip_id"], country, row["route_id"], country))
+    """, (row["trip_id"], country, args.route_id_prefix + row["route_id"], country))
 conn.commit()
 print(f"Imported {len(trips)} trips.")
 

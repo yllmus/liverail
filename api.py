@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timedelta
 from austria_poller import call_radar, parse_at_vehicles
 from poland_poller import fetch_feed, parse_pl_vehicles, resolve_delays
+from germany_poller import fetch_feed as fetch_de_feed, parse_de_vehicles, resolve_delays as resolve_de_delays
 
 app = FastAPI()
 
@@ -30,6 +31,7 @@ def get_conn():
 COUNTRY_ATTRIBUTION = {
     "AT": "Data: ÖBB (data.oebb.at), CC BY 4.0",
     "PL": "Data: PKP PLK (public sector data), via mkuran.pl",
+    "DE": "Data: DELFI e.V., via gtfs.de - schedule CC BY 4.0, realtime CC BY-SA 4.0",
 }
 
 @app.get("/countries")
@@ -310,6 +312,8 @@ def get_live(country: str = "HU"):
         return get_live_at()
     if country == "PL":
         return get_live_pl()
+    if country == "DE":
+        return get_live_de()
     return get_live_hu()
 
 _AT_LIVE_CACHE = {"data": None, "expires": 0}
@@ -373,6 +377,49 @@ def get_live_pl():
 
     _PL_LIVE_CACHE["data"] = result
     _PL_LIVE_CACHE["expires"] = now + PL_LIVE_CACHE_TTL
+    return result
+
+_DE_LIVE_CACHE = {"data": None, "expires": 0}
+DE_LIVE_CACHE_TTL = 25
+
+def get_live_de():
+    # Same semantic gap as PL's /live: this is a GTFS-RT TripUpdates feed
+    # (schedule-vs-actual for whatever's currently in transit), not a
+    # vehicle-position snapshot the way HU/AT's radar-style calls are - and
+    # unlike PL, resolution here also only covers ~16% of the raw feed
+    # (most of gtfs.de's realtime-free.pb is non-rail bus/tram traffic from
+    # regional transit operators that DE's rail-only static import doesn't
+    # include, by design - same as HU/AT/PL all being rail-scoped).
+    now = time.time()
+    if _DE_LIVE_CACHE["data"] is not None and now < _DE_LIVE_CACHE["expires"]:
+        return _DE_LIVE_CACHE["data"]
+
+    feed = fetch_de_feed()
+    raw_rows = parse_de_vehicles(feed)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    resolved = resolve_de_delays(cur, raw_rows)
+    cur.close()
+    conn.close()
+
+    result = [
+        {
+            "route_name": row["route_name"],
+            "train_number": "",
+            "current_stop": row["station_name"],
+            "delay_minutes": row["delay_minutes"],
+            "status": "IN_TRANSIT_TO",
+            "stops": [],
+            "stop_idx": None,
+            "lat": None,
+            "lon": None,
+        }
+        for row in resolved
+    ]
+
+    _DE_LIVE_CACHE["data"] = result
+    _DE_LIVE_CACHE["expires"] = now + DE_LIVE_CACHE_TTL
     return result
 
 def get_live_hu():

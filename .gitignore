@@ -29,3 +29,5 @@
 !tests/test_api.py
 !poland_poller.py
 !tests/test_pl_poller.py
+!germany_poller.py
+!tests/test_de_poller.py
