@@ -66,3 +66,26 @@ def test_live_at_mocks_radar_subprocess(monkeypatch):
     assert len(body) == 2
     assert body[0]["route_name"] == "RJ 61"
     assert body[0]["current_stop"] == "Wien Meidling"
+
+def test_live_pl_mocks_gtfs_rt_fetch(monkeypatch):
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.header.gtfs_realtime_version = "2.0"
+    e = feed.entity.add()
+    e.id = "1"
+    e.trip_update.trip.trip_id = "T1"
+    e.trip_update.trip.route_id = "R1"
+    stu = e.trip_update.stop_time_update.add()
+    stu.stop_id = "S1"
+    stu.arrival.delay = 120
+
+    monkeypatch.setattr(api, "fetch_feed", lambda: feed)
+    api._PL_LIVE_CACHE["data"] = None
+    api._PL_LIVE_CACHE["expires"] = 0
+
+    # No real PL stations/routes exist in this DB yet, so the ID lookup
+    # inside get_live_pl() won't match anything — this only exercises the
+    # fetch/parse/dispatch path, same real-DB approach as the rest of this
+    # suite, not a claim that PL data resolution works end-to-end.
+    resp = client.get("/live?country=PL")
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)

@@ -6,6 +6,7 @@ import requests as req
 import time
 from datetime import datetime, timedelta
 from austria_poller import call_radar, parse_at_vehicles
+from poland_poller import fetch_feed, parse_pl_vehicles
 
 app = FastAPI()
 
@@ -28,6 +29,7 @@ def get_conn():
 
 COUNTRY_ATTRIBUTION = {
     "AT": "Data: ÖBB (data.oebb.at), CC BY 4.0",
+    "PL": "Data: PKP PLK (public sector data), via mkuran.pl",
 }
 
 @app.get("/countries")
@@ -306,6 +308,8 @@ def _fmt_time(sec):
 def get_live(country: str = "HU"):
     if country == "AT":
         return get_live_at()
+    if country == "PL":
+        return get_live_pl()
     return get_live_hu()
 
 _AT_LIVE_CACHE = {"data": None, "expires": 0}
@@ -333,6 +337,49 @@ def get_live_at():
     ]
     _AT_LIVE_CACHE["data"] = result
     _AT_LIVE_CACHE["expires"] = now + AT_LIVE_CACHE_TTL
+    return result
+
+_PL_LIVE_CACHE = {"data": None, "expires": 0}
+PL_LIVE_CACHE_TTL = 25
+
+def get_live_pl():
+    now = time.time()
+    if _PL_LIVE_CACHE["data"] is not None and now < _PL_LIVE_CACHE["expires"]:
+        return _PL_LIVE_CACHE["data"]
+
+    feed = fetch_feed()
+    rows = parse_pl_vehicles(feed)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    result = []
+    for row in rows:
+        cur.execute("""
+            SELECT s.name, r.name
+            FROM stations s, routes r
+            WHERE s.gtfs_stop_id = %s AND s.country_code = 'PL'
+              AND r.gtfs_route_id = %s AND r.country_code = 'PL'
+        """, (row["gtfs_stop_id"], row["gtfs_route_id"]))
+        match = cur.fetchone()
+        if not match:
+            continue
+        stop_name, route_name = match
+        result.append({
+            "route_name": route_name,
+            "train_number": "",
+            "current_stop": stop_name,
+            "delay_minutes": row["delay_minutes"],
+            "status": "IN_TRANSIT_TO",
+            "stops": [],
+            "stop_idx": None,
+            "lat": None,
+            "lon": None,
+        })
+    cur.close()
+    conn.close()
+
+    _PL_LIVE_CACHE["data"] = result
+    _PL_LIVE_CACHE["expires"] = now + PL_LIVE_CACHE_TTL
     return result
 
 def get_live_hu():
