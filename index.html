@@ -840,6 +840,14 @@ initMap();
 loadCountriesMeta();
 loadAll();
 startRefresh();
+// Leaflet measures its container's size at construction time. The live
+// view is already the active tab on first load (no vtab click ever fires
+// to trigger the existing invalidateSize() call below), so if layout
+// settles a moment after initMap() runs (webfonts, the 980px grid
+// breakpoint), the map keeps the stale size it first measured - tiles
+// render short/clipped until something else happens to invalidate it.
+setTimeout(function(){if(state.map)state.map.invalidateSize();},300);
+window.addEventListener('resize',debounce(function(){if(state.map)state.map.invalidateSize();},200));
 })();
 </script>
 </body>

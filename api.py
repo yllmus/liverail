@@ -36,6 +36,34 @@ COUNTRY_ATTRIBUTION = {
     "DE": "Data: DELFI e.V., via gtfs.de - schedule CC BY 4.0, realtime CC BY-SA 4.0",
 }
 
+# /routes, /routes/summary, /stations/summary all aggregate over an entire
+# country's delay_observations - for HU (5.66M rows) and PL (8.29M rows)
+# that's genuinely I/O-bound on this box regardless of indexing (confirmed:
+# even a forced index-only scan on a (country_code, route_name) index still
+# took 5.3s, vs 8.3s for the planner's own chosen parallel seq scan - the
+# table just doesn't fit in this box's page cache). These are all
+# "historical reliability" views, not live data, so there's no reason to
+# recompute on every request - cached the same way /live already is, one
+# lock per (kind, country) so concurrent callers share a computation
+# instead of each independently re-running an 8s+ query.
+_SUMMARY_CACHE = {}  # (kind, country) -> {"data": ..., "expires": epoch}
+_SUMMARY_TTL = 900  # 15min - all-time reliability barely shifts minute to minute
+_SUMMARY_LOCKS = {}
+
+def _cached_summary(kind, country, compute_fn):
+    cache_key = (kind, country)
+    cached = _SUMMARY_CACHE.get(cache_key)
+    if cached is not None and time.time() < cached["expires"]:
+        return cached["data"]
+    lock = _SUMMARY_LOCKS.setdefault(cache_key, threading.Lock())
+    with lock:
+        cached = _SUMMARY_CACHE.get(cache_key)
+        if cached is not None and time.time() < cached["expires"]:
+            return cached["data"]
+        data = compute_fn()
+        _SUMMARY_CACHE[cache_key] = {"data": data, "expires": time.time() + _SUMMARY_TTL}
+        return data
+
 @app.get("/countries")
 def get_countries():
     conn = get_conn()
@@ -85,8 +113,7 @@ def get_station_delays(station_name: str, country: str = "HU"):
     conn.close()
     return row
 
-@app.get("/routes")
-def get_routes(country: str = "HU"):
+def _routes_query(country):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -99,8 +126,11 @@ def get_routes(country: str = "HU"):
     conn.close()
     return [r["route_name"] for r in rows]
 
-@app.get("/routes/summary")
-def get_routes_summary(country: str = "HU"):
+@app.get("/routes")
+def get_routes(country: str = "HU"):
+    return _cached_summary("routes_list", country, lambda: _routes_query(country))
+
+def _routes_summary_query(country):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -119,6 +149,10 @@ def get_routes_summary(country: str = "HU"):
     cur.close()
     conn.close()
     return [dict(r) for r in rows]
+
+@app.get("/routes/summary")
+def get_routes_summary(country: str = "HU"):
+    return _cached_summary("routes", country, lambda: _routes_summary_query(country))
 
 @app.get("/route/{route_name}/delays")
 def get_route_delays(route_name: str, country: str = "HU"):
@@ -240,8 +274,7 @@ def get_heatmap(station: str = None, route: str = None, country: str = "HU"):
     cur.close(); conn.close()
     return [dict(r) for r in rows]
 
-@app.get("/stations/summary")
-def get_stations_summary(country: str = "HU"):
+def _stations_summary_query(country):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     # station_name stays s.name (the live click-through lookup key index.html
@@ -265,6 +298,10 @@ def get_stations_summary(country: str = "HU"):
     rows = cur.fetchall()
     cur.close(); conn.close()
     return [dict(r) for r in rows]
+
+@app.get("/stations/summary")
+def get_stations_summary(country: str = "HU"):
+    return _cached_summary("stations", country, lambda: _stations_summary_query(country))
 
 @app.get("/trend")
 def get_trend(route: str = None, station: str = None, days: int = 30, country: str = "HU"):
