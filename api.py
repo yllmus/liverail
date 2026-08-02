@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 import psycopg2.extras
 import requests as req
+import threading
 import time
 from datetime import datetime, timedelta
 from austria_poller import call_radar, parse_at_vehicles
@@ -394,9 +395,22 @@ def _live_de():
 
 _LIVE_PROVIDERS = {
     "AT": (_live_at, 25),
-    "PL": (_live_pl, 25),
-    "DE": (_live_de, 25),
+    # PL/DE's fetch_fn is a fresh GTFS-RT pull + a per-row schedule join
+    # (~30s for PL's ~22k trip updates, confirmed) - not cheap like AT's
+    # radar() call. A 25s TTL (matched almost exactly to the frontend's old
+    # 30s auto-refresh interval) meant this expensive path reran on nearly
+    # every refresh tick. Longer TTL since the underlying data doesn't
+    # actually move faster than our own poller samples it (every 5min).
+    "PL": (_live_pl, 90),
+    "DE": (_live_de, 60),
 }
+# One lock per non-HU provider so concurrent requests for the same country
+# (board + map fire together on every tab switch and every 30s auto-refresh)
+# don't independently duplicate the same ~30-90s PL/DE resolve - found while
+# investigating the PL map timeout: two callers racing a cold cache each ran
+# the full fetch+resolve concurrently, roughly doubling load on this box's
+# single vCPU instead of one computing while the other waits and reuses it.
+_LIVE_LOCKS = {country: threading.Lock() for country in _LIVE_PROVIDERS}
 
 @app.get("/live")
 def get_live(country: str = "HU"):
@@ -406,13 +420,18 @@ def get_live(country: str = "HU"):
     if provider is None:
         return []
     fetch_fn, ttl = provider
-    now = time.time()
     cached = _LIVE_CACHE.get(country)
-    if cached is not None and now < cached["expires"]:
+    if cached is not None and time.time() < cached["expires"]:
         return cached["data"]
-    data = fetch_fn()
-    _LIVE_CACHE[country] = {"data": data, "expires": now + ttl}
-    return data
+    with _LIVE_LOCKS[country]:
+        # Re-check: another thread may have refreshed the cache while this
+        # one waited on the lock.
+        cached = _LIVE_CACHE.get(country)
+        if cached is not None and time.time() < cached["expires"]:
+            return cached["data"]
+        data = fetch_fn()
+        _LIVE_CACHE[country] = {"data": data, "expires": time.time() + ttl}
+        return data
 
 # name -> display_name per country, for turning the raw station strings the
 # live feeds emit into rider-facing labels. Cached because it only changes on
