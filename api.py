@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from austria_poller import call_radar, parse_at_vehicles
 from poland_poller import fetch_feed, parse_pl_vehicles, resolve_delays
 from germany_poller import fetch_feed as fetch_de_feed, parse_de_vehicles, resolve_delays as resolve_de_delays
+from station_names import clean_display_name
 
 app = FastAPI()
 
@@ -412,6 +413,132 @@ def get_live(country: str = "HU"):
     data = fetch_fn()
     _LIVE_CACHE[country] = {"data": data, "expires": now + ttl}
     return data
+
+# name -> display_name per country, for turning the raw station strings the
+# live feeds emit into rider-facing labels. Cached because it only changes on
+# a GTFS re-import, and DE's map alone is ~7.8k rows.
+_DISPLAY_CACHE = {}  # country_code -> {"map": {...}, "expires": epoch}
+_DISPLAY_TTL = 3600
+
+def _display_map(country):
+    now = time.time()
+    cached = _DISPLAY_CACHE.get(country)
+    if cached is not None and now < cached["expires"]:
+        return cached["map"]
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT name, display_name FROM stations
+            WHERE country_code = %s AND display_name IS NOT NULL
+        """, (country,))
+        mapping = dict(cur.fetchall())
+    finally:
+        cur.close()
+        conn.close()
+    _DISPLAY_CACHE[country] = {"map": mapping, "expires": now + _DISPLAY_TTL}
+    return mapping
+
+def _display_stop(mapping, raw, country):
+    # AT is the reason for the fallback: its live HAFAS names disagree with
+    # its own GTFS names for most stations (3/40 matched in real data - the
+    # documented name-matching limitation), so an unmatched name still gets
+    # the same formatting rules applied rather than being shown raw.
+    if not raw:
+        return raw
+    return mapping.get(raw) or clean_display_name(raw, country) or raw
+
+@app.get("/live/board")
+def get_live_board(country: str = "HU", limit: int = 300, q: str = ""):
+    """Live board for the frontend: full-feed aggregates plus a capped,
+    delay-ranked slice of trains.
+
+    /live stays untouched (a bare array, whatever size the feed is). This
+    exists because that shape can't drive a real UI for PL/DE: PL's feed is
+    22k+ TripUpdates (a 4.8MB response), so the client needs server-side
+    ranking, searching, and capping - and it needs the aggregates computed
+    over the *whole* feed, not just the slice it renders.
+    """
+    rows = get_live(country)
+    mapping = _display_map(country)
+
+    delays = [r["delay_minutes"] or 0 for r in rows]
+    delayed = sum(1 for d in delays if d > 2)
+    positioned = [r for r in rows if r.get("lat") is not None]
+    sources = {}
+    for r in positioned:
+        key = r.get("position_source") or "unknown"
+        sources[key] = sources.get(key, 0) + 1
+
+    needle = q.strip().lower()
+    if needle:
+        def matches(r):
+            for key in ("route_name", "current_stop", "headsign", "train_number"):
+                val = r.get(key)
+                if val and needle in str(val).lower():
+                    return True
+            return False
+        rows = [r for r in rows if matches(r)]
+
+    ranked = sorted(rows, key=lambda r: r["delay_minutes"] or 0, reverse=True)
+    shown = ranked[:limit] if limit and limit > 0 else ranked
+
+    trains = []
+    for r in shown:
+        t = dict(r)
+        # current_stop stays the raw name - index.html passes it straight to
+        # /station/{name}/stats, which matches on stations.name. Only ever
+        # add the display label alongside it, never substitute it in.
+        t["current_stop_display"] = _display_stop(mapping, r.get("current_stop"), country)
+        if r.get("stops"):
+            t["stops"] = [
+                {**s, "display": _display_stop(mapping, s.get("name"), country)}
+                for s in r["stops"]
+            ]
+        trains.append(t)
+
+    return {
+        "meta": {
+            "country": country,
+            "total": len(delays),
+            "matched": len(ranked),
+            "shown": len(trains),
+            "delayed": delayed,
+            "on_time_pct": round(100.0 * (len(delays) - delayed) / len(delays), 1) if delays else None,
+            "avg_delay": round(sum(delays) / len(delays), 1) if delays else None,
+            "worst_delay": max(delays) if delays else None,
+            "with_position": len(positioned),
+            "position_sources": sources,
+            "attribution": COUNTRY_ATTRIBUTION.get(country),
+        },
+        "trains": trains,
+    }
+
+@app.get("/live/positions")
+def get_live_positions(country: str = "HU"):
+    """Only the trains that actually resolved a coordinate - what the map
+    needs. Separate from /live/board because the board is delay-ranked and
+    capped, while the map wants every positioned train regardless of delay
+    (and for PL/DE that's a small subset: 441/22353 and 1292/5533 in real
+    polls, since their positions are schedule-interpolated, not GPS)."""
+    mapping = _display_map(country)
+    out = []
+    for r in get_live(country):
+        if r.get("lat") is None or r.get("lon") is None:
+            continue
+        out.append({
+            "route_name": r["route_name"],
+            "train_number": r.get("train_number") or "",
+            "headsign": r.get("headsign"),
+            "current_stop": r.get("current_stop"),
+            "current_stop_display": _display_stop(mapping, r.get("current_stop"), country),
+            "delay_minutes": r["delay_minutes"],
+            "status": r.get("status"),
+            "lat": r["lat"],
+            "lon": r["lon"],
+            "position_source": r.get("position_source"),
+        })
+    return out
 
 def get_live_hu():
     try:
