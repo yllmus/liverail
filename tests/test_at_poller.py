@@ -19,6 +19,7 @@ def test_parse_at_vehicles_extracts_rows_with_delay():
         "headsign": "Wien Hbf",
         "lat": 48.185,
         "lon": 16.375,
+        "live_trip_id": "1|12345|0|86|20260801",
     }
 
 def test_parse_at_vehicles_falls_back_to_departure_delay():

@@ -78,6 +78,14 @@ def parse_at_vehicles(movements):
             "headsign": m.get("direction"),
             "lat": location.get("latitude"),
             "lon": location.get("longitude"),
+            # HAFAS's own composite tripId, e.g. "1|12345|0|86|20260801" -
+            # this is a HAFAS-internal identifier, not a GTFS trip_id, and
+            # structurally can never be joined against trips.gtfs_trip_id
+            # (confirmed: AT's static trip ids look like
+            # "1.TA.1-80-j26-1.1.H" - disjoint namespace, not a formatting
+            # mismatch). Stored opaque/unresolved, same convention as HU -
+            # see NOTES.md "Live per-train identity".
+            "live_trip_id": m.get("tripId"),
         })
     return rows
 
@@ -97,15 +105,15 @@ def poll():
         position_source = "live" if row["lat"] is not None else None
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source)
-            SELECT s.id, %s, NOW(), %s, false, %s, %s, %s, %s, %s, %s
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id)
+            SELECT s.id, %s, NOW(), %s, false, %s, %s, %s, %s, %s, %s, %s
             FROM stations s
             WHERE s.name = ANY(%s) AND s.country_code = %s
             ORDER BY array_position(%s, s.name)
             LIMIT 1
         """, (
             date.today(), row["delay_minutes"], row["route_name"], COUNTRY_CODE,
-            row["headsign"], row["lat"], row["lon"], position_source,
+            row["headsign"], row["lat"], row["lon"], position_source, row["live_trip_id"],
             station_name_candidates(row["stop_name"]), COUNTRY_CODE,
             station_name_candidates(row["stop_name"]),
         ))

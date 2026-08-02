@@ -120,6 +120,7 @@ def test_resolve_delays_translates_child_stop_id_via_parent_map():
         "lat": None,
         "lon": None,
         "position_source": None,
+        "trip_id": 99,
     }
     # the query must have been issued against the *parent* id, not the raw one
     assert "437028" in cur.last_query_args

@@ -108,7 +108,7 @@ def resolve_delays(cur, rows, now_epoch=None):
     for row in rows:
         cur.execute("""
             SELECT st.station_id, st.scheduled_arrival, st.scheduled_departure,
-                   s.name, s.lat, s.lon, r.name, t.headsign
+                   s.name, s.lat, s.lon, r.name, t.headsign, t.id
             FROM trips t
             JOIN stop_times st ON st.trip_id = t.id AND st.stop_sequence = %s
             JOIN stations s ON s.id = st.station_id
@@ -119,7 +119,7 @@ def resolve_delays(cur, rows, now_epoch=None):
         if not match:
             continue
         (station_id, sched_arrival, sched_departure, station_name,
-         target_lat, target_lon, route_name, headsign) = match
+         target_lat, target_lon, route_name, headsign, trip_id) = match
         scheduled_epoch = _scheduled_epoch(row["start_date"], sched_arrival or sched_departure)
         if scheduled_epoch is None:
             continue
@@ -154,6 +154,7 @@ def resolve_delays(cur, rows, now_epoch=None):
             "lat": lat,
             "lon": lon,
             "position_source": position_source,
+            "trip_id": trip_id,
         })
     return resolved
 
@@ -171,11 +172,11 @@ def poll():
         print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source)
-            VALUES (%s, CURRENT_DATE, NOW(), %s, false, %s, %s, %s, %s, %s, %s)
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, trip_id)
+            VALUES (%s, CURRENT_DATE, NOW(), %s, false, %s, %s, %s, %s, %s, %s, %s)
         """, (
             row["station_id"], row["delay_minutes"], row["route_name"], COUNTRY_CODE, row["headsign"],
-            row["lat"], row["lon"], row["position_source"],
+            row["lat"], row["lon"], row["position_source"], row["trip_id"],
         ))
         count += 1
     conn.commit()

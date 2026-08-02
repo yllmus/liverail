@@ -57,6 +57,13 @@ def parse_vehicles(data):
             "headsign": trip.get("tripHeadsign"),
             "lat": v.get("lat"),
             "lon": v.get("lon"),
+            # OTP's live gtfsId, e.g. "1:32566556" - confirmed (2026-08-02)
+            # this does NOT match trips.gtfs_trip_id for any sampled trip in
+            # our imported static feed (checked directly against the real
+            # endpoint + DB, 0/4 matched, exact and substring). Stored as an
+            # opaque, unresolved identifier for now - see NOTES.md "Live
+            # per-train identity" for why this isn't joined to `trips`.
+            "live_trip_id": trip.get("gtfsId"),
         })
     return rows
 
@@ -79,13 +86,14 @@ def poll():
         position_source = "live" if row["lat"] is not None else None
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source)
-            SELECT s.id, %s, NOW(), %s, false, %s, %s, %s, %s, %s, %s
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id)
+            SELECT s.id, %s, NOW(), %s, false, %s, %s, %s, %s, %s, %s, %s
             FROM stations s
             WHERE s.name = %s AND s.country_code = %s
         """, (
             date.today(), row["delay_minutes"], row["route_name"], COUNTRY_CODE,
-            row["headsign"], row["lat"], row["lon"], position_source, row["stop_name"], COUNTRY_CODE,
+            row["headsign"], row["lat"], row["lon"], position_source, row["live_trip_id"],
+            row["stop_name"], COUNTRY_CODE,
         ))
         count += 1
     conn.commit()

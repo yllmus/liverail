@@ -19,6 +19,7 @@ def test_parse_vehicles_extracts_rows_with_delay():
         "headsign": "Szeged",
         "lat": 46.9061,
         "lon": 19.6906,
+        "live_trip_id": "HU:1:1234",
     }
 
 def test_parse_vehicles_falls_back_to_departure_delay():

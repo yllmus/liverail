@@ -196,6 +196,7 @@ def resolve_delays(cur, rows, parent_map=None, now_epoch=None):
             "lat": lat,
             "lon": lon,
             "position_source": position_source,
+            "trip_id": trip_id,
         })
     return resolved
 
@@ -213,11 +214,11 @@ def poll():
         print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, lat, lon, position_source)
-            VALUES (%s, CURRENT_DATE, NOW(), %s, false, %s, %s, %s, %s, %s)
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, lat, lon, position_source, trip_id)
+            VALUES (%s, CURRENT_DATE, NOW(), %s, false, %s, %s, %s, %s, %s, %s)
         """, (
             row["station_id"], row["delay_minutes"], row["route_name"], COUNTRY_CODE,
-            row["lat"], row["lon"], row["position_source"],
+            row["lat"], row["lon"], row["position_source"], row["trip_id"],
         ))
         count += 1
     conn.commit()

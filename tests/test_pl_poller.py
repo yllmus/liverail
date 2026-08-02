@@ -102,7 +102,7 @@ def test_resolve_delays_computes_delay_from_scheduled_and_actual():
     # covered separately below.
     scheduled = _scheduled_epoch("20260801", "09:59:00")
     cur = _FakeCursor([
-        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny"),
+        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7),
         None,
     ])
     rows = [{
@@ -119,6 +119,7 @@ def test_resolve_delays_computes_delay_from_scheduled_and_actual():
     assert resolved[0]["lat"] is None
     assert resolved[0]["lon"] is None
     assert resolved[0]["position_source"] is None
+    assert resolved[0]["trip_id"] == 7
 
 def test_resolve_delays_skips_unmatched_trips():
     cur = _FakeCursor(None)
@@ -137,7 +138,7 @@ def test_resolve_delays_estimates_position_from_previous_stop():
     target_arrival = _scheduled_epoch("20260801", "12:00:00")
     now = prev_departure + (target_arrival - prev_departure) * 0.25
     cur = _FakeCursor([
-        (42, "12:00:00", None, "Kraków Główny", 50.0680, 19.9476, "IC 1", None),
+        (42, "12:00:00", None, "Kraków Główny", 50.0680, 19.9476, "IC 1", None, 7),
         (52.2297, 21.0122, "09:00:00", None),  # previous stop: Warszawa Centralna
     ])
     rows = [{
