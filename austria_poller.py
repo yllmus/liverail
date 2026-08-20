@@ -4,10 +4,12 @@ import subprocess
 import psycopg2
 from datetime import date
 
+from config import DB_PASSWORD
+
 DB_CONFIG = {
     "dbname": "train_delay_db",
     "user": "trainuser",
-    "password": "changeme",
+    "password": DB_PASSWORD,
     "host": "localhost"
 }
 

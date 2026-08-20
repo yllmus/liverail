@@ -4,11 +4,12 @@ import pandas as pd
 import psycopg2
 
 from station_names import clean_display_name
+from config import DB_PASSWORD
 
 DB_CONFIG = {
     "dbname": "train_delay_db",
     "user": "trainuser",
-    "password": "changeme",
+    "password": DB_PASSWORD,
     "host": "localhost"
 }
 
@@ -200,6 +201,7 @@ if args.with_stop_times:
             FROM trips t, stations s
             WHERE t.gtfs_trip_id = %s AND t.country_code = %s
               AND s.gtfs_stop_id = %s AND s.country_code = %s
+            ON CONFLICT (trip_id, stop_sequence) DO NOTHING
         """, (
             row.get("arrival_time"), row.get("departure_time"), row["stop_sequence"],
             row["trip_id"], country, resolved_stop_id, country,

@@ -19,7 +19,16 @@ try {
   // client.radar() resolves to {movements: [...], realtimeDataUpdatedAt}.
   // Only the array is written out — austria_poller.py's parse_at_vehicles()
   // (and its test fixture) expect a bare list of vehicle movements.
-  const { movements } = await client.radar(bbox, { results: 256, duration: 30 });
+  //
+  // results was left at hafas-client's own default (256) - confirmed by
+  // direct testing this was silently truncating the real feed hard: Austria
+  // nationally has ~1000-1700+ concurrent train+bus movements (a raw
+  // results:3000 call returned 1689, well under that cap, i.e. the true
+  // count), of which ~900-1000 are mode:"train" - vs. the ~110-115 that
+  // made it through the old 256-item cap after bus-filtering. 2000 gives
+  // headroom above the observed high-water mark without asking HAFAS for
+  // an unbounded/unnecessarily large response.
+  const { movements } = await client.radar(bbox, { results: 2000, duration: 30 });
   process.stdout.write(JSON.stringify(movements));
 } catch (err) {
   process.stderr.write(`radar.js failed: ${err.message}\n`);
