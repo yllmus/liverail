@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from html import escape as _esc
 from urllib.parse import quote as _urlquote
+import json
+import os
 import psycopg2
 import psycopg2.extras
 import requests as req
@@ -769,6 +771,37 @@ def get_live_hu():
         })
 
     return result
+
+@app.get("/health")
+def health():
+    """Last result from monitor.py, served as JSON.
+
+    monitor.py writes the file on a schedule rather than this endpoint doing
+    the checks: they hit all four upstream feeds, which is far too expensive
+    to run per request, and an endpoint that only reports when polled is not
+    monitoring anyway (see monitor.py's own docstring for the failures this
+    exists to catch). Reading a file also means /health still answers when
+    the database is the thing that's broken."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor_status.json")
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+    except FileNotFoundError:
+        return {"status": "unknown", "detail": "monitor.py has not run yet"}
+    except Exception as exc:
+        return {"status": "unknown", "detail": f"could not read status: {exc}"}
+    age_min = None
+    try:
+        checked = datetime.fromisoformat(doc["checked_at"])
+        age_min = round((datetime.now() - checked).total_seconds() / 60, 1)
+    except Exception:
+        pass
+    # A stale status file is itself a failure - it means the monitor stopped.
+    if age_min is not None and age_min > 60:
+        doc = {**doc, "status": "critical",
+               "detail": f"monitor.py last ran {age_min:.0f} min ago"}
+    doc["age_minutes"] = age_min
+    return doc
 
 # --- One train's full journey -----------------------------------------
 # /train/{country}/{id} is what turns this from a delay-statistics site into

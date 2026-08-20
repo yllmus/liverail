@@ -42,3 +42,4 @@
 !schema/compensation_rules_seed.sql
 !schema/partner_links_seed.sql
 !robots.txt
+!monitor.py

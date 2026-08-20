@@ -28,7 +28,14 @@ try {
   // made it through the old 256-item cap after bus-filtering. 2000 gives
   // headroom above the observed high-water mark without asking HAFAS for
   // an unbounded/unnecessarily large response.
-  const { movements } = await client.radar(bbox, { results: 2000, duration: 30 });
+  //
+  // Raised 2000 -> 4000 on 2026-08-20: monitor.py's "did the feed come back
+  // pinned exactly at the cap" check fired at evening peak, and a probe
+  // confirmed the true count was 2143 movements (1056 trains) - so 2000 was
+  // quietly truncating again, the same failure the 256 default caused. The
+  // check stays in monitor.py precisely because this will recur as OBB's
+  // traffic grows; it should be caught rather than rediscovered.
+  const { movements } = await client.radar(bbox, { results: 4000, duration: 30 });
   process.stdout.write(JSON.stringify(movements));
 } catch (err) {
   process.stderr.write(`radar.js failed: ${err.message}\n`);
