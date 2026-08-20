@@ -6,10 +6,12 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from google.transit import gtfs_realtime_pb2
 
+from config import DB_PASSWORD
+
 DB_CONFIG = {
     "dbname": "train_delay_db",
     "user": "trainuser",
-    "password": "changeme",
+    "password": DB_PASSWORD,
     "host": "localhost"
 }
 
@@ -209,8 +211,25 @@ def poll():
     print(f"Got {len(raw_rows)} raw stop-time updates")
     resolved = resolve_delays(cur, raw_rows)
     print(f"Resolved {len(resolved)}/{len(raw_rows)} against known DE stations/trips")
+
+    # Same fix as poland_poller.py: gtfs.de's feed re-reports an unchanged
+    # delay for a trip across many consecutive polls, so only write a row
+    # when the delay actually changed since the trip's last observation.
+    trip_ids = [row["trip_id"] for row in resolved]
+    cur.execute("""
+        SELECT DISTINCT ON (trip_id) trip_id, delay_minutes
+        FROM delay_observations
+        WHERE trip_id = ANY(%s)
+        ORDER BY trip_id, id DESC
+    """, (trip_ids,))
+    last_delay = dict(cur.fetchall())
+
     count = 0
+    skipped = 0
     for row in resolved:
+        if last_delay.get(row["trip_id"]) == row["delay_minutes"]:
+            skipped += 1
+            continue
         print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
         cur.execute("""
             INSERT INTO delay_observations
@@ -224,7 +243,7 @@ def poll():
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Saved {count} observations.")
+    print(f"Saved {count} observations, skipped {skipped} unchanged.")
 
 if __name__ == "__main__":
     poll()

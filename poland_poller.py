@@ -5,10 +5,12 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from google.transit import gtfs_realtime_pb2
 
+from config import DB_PASSWORD
+
 DB_CONFIG = {
     "dbname": "train_delay_db",
     "user": "trainuser",
-    "password": "changeme",
+    "password": DB_PASSWORD,
     "host": "localhost"
 }
 
@@ -156,7 +158,20 @@ def resolve_delays(cur, rows, now_epoch=None):
             "position_source": position_source,
             "trip_id": trip_id,
         })
-    return resolved
+    # mkuran.pl's live feed can legitimately carry two simultaneously-active
+    # entities for the same recurring gtfs_trip_id at once (e.g. an overnight
+    # service still running under yesterday's start_date, plus today's
+    # edition of the same daily service already appearing) - confirmed
+    # against the real feed: distinct entity.id, distinct (trip_id,
+    # start_date) pairs, so this isn't a malformed/duplicated feed. But
+    # trips/stop_times hold no per-service-day rows, only a single static
+    # schedule per gtfs_trip_id, so both entities resolve to an identical
+    # station/route/headsign here and would otherwise be written as
+    # indistinguishable duplicate rows (confirmed: ~4-6% of a poll's rows).
+    # Properly attributing each to its own service-day instance needs a
+    # schema that records start_date, which delay_observations doesn't -
+    # until then, collapse to one row per trip_id rather than double-count.
+    return list({r["trip_id"]: r for r in resolved}.values())
 
 def poll():
     conn = psycopg2.connect(**DB_CONFIG)
@@ -167,8 +182,29 @@ def poll():
     print(f"Got {len(raw_rows)} raw stop-time updates")
     resolved = resolve_delays(cur, raw_rows)
     print(f"Resolved {len(resolved)}/{len(raw_rows)} against known stations/schedule")
+
+    # mkuran.pl's first stop_time_update for a trip stays the same predicted
+    # stop for many consecutive polls until the train actually reaches it -
+    # writing a fresh row every 5 min regardless was the dominant driver of
+    # DB growth (confirmed: ~1.5-1.8M PL rows/day, ~193x more than the
+    # distinct (trip_id, delay_minutes) pairs actually observed). Only write
+    # a new row when the delay for a trip has actually changed since its
+    # last recorded observation.
+    trip_ids = [row["trip_id"] for row in resolved]
+    cur.execute("""
+        SELECT DISTINCT ON (trip_id) trip_id, delay_minutes
+        FROM delay_observations
+        WHERE trip_id = ANY(%s)
+        ORDER BY trip_id, id DESC
+    """, (trip_ids,))
+    last_delay = dict(cur.fetchall())
+
     count = 0
+    skipped = 0
     for row in resolved:
+        if last_delay.get(row["trip_id"]) == row["delay_minutes"]:
+            skipped += 1
+            continue
         print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
         cur.execute("""
             INSERT INTO delay_observations
@@ -182,7 +218,7 @@ def poll():
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Saved {count} observations.")
+    print(f"Saved {count} observations, skipped {skipped} unchanged.")
 
 if __name__ == "__main__":
     poll()

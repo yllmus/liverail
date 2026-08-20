@@ -121,6 +121,24 @@ def test_resolve_delays_computes_delay_from_scheduled_and_actual():
     assert resolved[0]["position_source"] is None
     assert resolved[0]["trip_id"] == 7
 
+def test_resolve_delays_dedupes_same_trip_id_across_start_dates():
+    # Confirmed against the real feed (2026-08-03): PKP's live feed can carry
+    # two simultaneously-active entities for the same recurring gtfs_trip_id
+    # at once (an overnight rollover instance under yesterday's start_date,
+    # and today's edition already appearing under today's) - both resolve to
+    # the same station/route via the same static trips/stop_times row, so
+    # without dedup this would double-write an indistinguishable row.
+    scheduled = _scheduled_epoch("20260801", "09:59:00")
+    match = (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7)
+    cur = _FakeCursor([match, None, match, None])
+    rows = [
+        {"gtfs_trip_id": "T1", "start_date": "20260801", "stop_sequence": 3, "actual_epoch": scheduled + 60},
+        {"gtfs_trip_id": "T1", "start_date": "20260802", "stop_sequence": 3, "actual_epoch": scheduled + 60},
+    ]
+    resolved = resolve_delays(cur, rows)
+    assert len(resolved) == 1
+    assert resolved[0]["trip_id"] == 7
+
 def test_resolve_delays_skips_unmatched_trips():
     cur = _FakeCursor(None)
     rows = [{
