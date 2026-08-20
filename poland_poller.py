@@ -1,7 +1,7 @@
 import time
 import requests
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from google.transit import gtfs_realtime_pb2
 
@@ -213,13 +213,21 @@ def poll():
     # distinct (trip_id, delay_minutes) pairs actually observed). Only write
     # a new row when the delay for a trip has actually changed since its
     # last recorded observation.
+    # Scoped to TODAY, which the first version of this wasn't - and that was a
+    # real data-integrity bug, not a nuance. 92.8% of PL trip_ids recur across
+    # days (DE 43.2%, both measured), and ~71% of PL rows are exactly 0.0
+    # minutes, so an unscoped "has this trip's delay changed since its last
+    # observation" meant a train that runs punctually every day was recorded
+    # once and then never again - every later day silently vanished. Comparing
+    # within the service day gives each trip at least one row per day while
+    # still collapsing the repeat-every-5-minutes noise this was written for.
     trip_ids = [row["trip_id"] for row in resolved]
     cur.execute("""
         SELECT DISTINCT ON (trip_id) trip_id, delay_minutes
         FROM delay_observations
-        WHERE trip_id = ANY(%s)
+        WHERE trip_id = ANY(%s) AND observed_date = %s
         ORDER BY trip_id, id DESC
-    """, (trip_ids,))
+    """, (trip_ids, date.today()))
     last_delay = dict(cur.fetchall())
 
     count = 0

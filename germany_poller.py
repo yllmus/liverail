@@ -219,13 +219,16 @@ def poll():
     # Same fix as poland_poller.py: gtfs.de's feed re-reports an unchanged
     # delay for a trip across many consecutive polls, so only write a row
     # when the delay actually changed since the trip's last observation.
+    # Scoped to today - see the same block in poland_poller.py for why the
+    # unscoped version silently dropped every recurring trip whose delay
+    # matched its last recorded value (43.2% of DE trip_ids recur across days).
     trip_ids = [row["trip_id"] for row in resolved]
     cur.execute("""
         SELECT DISTINCT ON (trip_id) trip_id, delay_minutes
         FROM delay_observations
-        WHERE trip_id = ANY(%s)
+        WHERE trip_id = ANY(%s) AND observed_date = %s
         ORDER BY trip_id, id DESC
-    """, (trip_ids,))
+    """, (trip_ids, date.today()))
     last_delay = dict(cur.fetchall())
 
     count = 0
