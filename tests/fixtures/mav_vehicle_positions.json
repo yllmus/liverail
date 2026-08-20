@@ -34,6 +34,20 @@
         },
         "stopRelationship": null,
         "prevOrCurrentStop": { "arrivalDelay": 120 }
+      },
+      {
+        "lat": 46.253,
+        "lon": 20.1414,
+        "trip": {
+          "gtfsId": "HU:1:36441",
+          "tripShortName": "36441 személyvonat",
+          "tripHeadsign": "Kiskunfélegyháza",
+          "route": { "longName": "Sz 36410/36412/36413/36415/36423/36424/36432/36437/36438/36441/36443" }
+        },
+        "stopRelationship": {
+          "stop": { "gtfsId": "HU:1:2222", "name": "Kiskunfelegyhaza" }
+        },
+        "prevOrCurrentStop": { "arrivalDelay": 60, "departureDelay": 60 }
       }
     ]
   }
