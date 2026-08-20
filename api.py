@@ -824,3 +824,143 @@ def sitemap(request: Request):
 def robots_txt(request: Request):
     base = _base_url(request)
     return PlainTextResponse(f"User-agent: *\nAllow: /\nSitemap: {base}/sitemap.xml\n")
+
+# --- Compensation eligibility + claim assist -----------------------------
+# Real feature, not a schema stub: backed by compensation_rules, seeded
+# 2026-08-20 with sourced EU Regulation 2021/782 figures per country (see
+# schema/compensation_rules_seed.sql for the full sourcing). No third-party
+# "AirHelp for trains" service exists in Europe (checked directly, not
+# assumed) - passengers claim straight from the operator - so this doesn't
+# try to be a claims broker. It computes eligibility from a delay already
+# visible in this app, and helps a user assemble what their operator's own
+# claim form asks for. No login, no payment, no data stored - purely
+# computed from parameters the frontend already has in hand (a live board
+# row or a history row), consistent with keeping auth/payments out of this
+# pass entirely.
+
+_COUNTRY_CURRENCY = {"HU": "HUF", "AT": "EUR", "DE": "EUR", "PL": "PLN"}
+_COUNTRY_CLAIM_URL = {
+    "HU": "https://www.mavcsoport.hu/mav-szemelyszallitas/gyik/kesesigazolas-karterites",
+    "AT": "https://www.oebb.at/en/fragen-und-antworten/rechte-pflichten/fahrgastrechte",
+    "DE": "https://int.bahn.de/en/help/contact/passengers-rights-claim-form",
+    "PL": "https://www.intercity.pl/en/dokumenty/wniosek_miedzynarodowy.pdf",
+}
+
+def _compensation_lookup(country: str, delay_minutes: float):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT min_delay_minutes, refund_pct, source_url, verified, notes
+        FROM compensation_rules
+        WHERE country_code = %s AND min_delay_minutes <= %s
+        ORDER BY min_delay_minutes DESC
+        LIMIT 1
+    """, (country, delay_minutes))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    return row
+
+@app.get("/compensation/check")
+def compensation_check(country: str = "HU", delay_minutes: float = 0, ticket_price: float = None):
+    rule = _compensation_lookup(country, delay_minutes)
+    result = {
+        "country": country,
+        "delay_minutes": delay_minutes,
+        "currency": _COUNTRY_CURRENCY.get(country),
+        "claim_url": _COUNTRY_CLAIM_URL.get(country),
+    }
+    if not rule:
+        result["eligible"] = False
+        result["message"] = "This delay is below the compensation threshold for this country."
+        return result
+    result["eligible"] = True
+    result["refund_pct"] = float(rule["refund_pct"])
+    result["threshold_minutes"] = rule["min_delay_minutes"]
+    result["source_url"] = rule["source_url"]
+    result["notes"] = rule["notes"]
+    if ticket_price:
+        result["estimated_refund"] = round(ticket_price * float(rule["refund_pct"]) / 100, 2)
+    result["message"] = f"This delay likely qualifies for a {rule['refund_pct']:g}% refund under EU passenger-rights rules."
+    return result
+
+@app.get("/compensation/claim")
+def compensation_claim(country: str = "HU", route_name: str = "", station_name: str = "",
+                        delay_minutes: float = 0, actual_arrival: str = None, ticket_price: float = None):
+    """Assembles what the operator's own claim form asks for, from data
+    this app already shows the user - not a submission, just a
+    fill-in-the-blanks aid. actual_arrival is an ISO timestamp string from
+    the frontend (already displayed there); scheduled time is derived by
+    subtracting the delay, good enough for a claim aid, not a legal
+    timestamp authority."""
+    rule = _compensation_lookup(country, delay_minutes)
+    scheduled = None
+    if actual_arrival:
+        try:
+            actual_dt = datetime.fromisoformat(actual_arrival)
+            scheduled = (actual_dt - timedelta(minutes=delay_minutes)).isoformat()
+        except ValueError:
+            pass
+    summary = {
+        "country": _COUNTRY_NAMES.get(country, country),
+        "train": route_name,
+        "station": station_name,
+        "scheduled_time": scheduled,
+        "actual_time": actual_arrival,
+        "delay_minutes": delay_minutes,
+        "eligible": bool(rule),
+        "refund_pct": float(rule["refund_pct"]) if rule else None,
+        "estimated_refund": round(ticket_price * float(rule["refund_pct"]) / 100, 2) if (rule and ticket_price) else None,
+        "currency": _COUNTRY_CURRENCY.get(country),
+        "claim_url": _COUNTRY_CLAIM_URL.get(country),
+        "checklist": [
+            "Train/route number and date of travel",
+            "Departure and arrival station names",
+            "Scheduled vs. actual arrival time (shown above)",
+            "Your ticket (or booking reference, if bought online)",
+            "Bank details or voucher preference, if the claim is approved",
+        ],
+    }
+    return summary
+
+@app.get("/partner-links")
+def get_partner_links(country: str = "HU", kind: str = None):
+    """Active sponsored/partner links for a country, so the frontend can
+    render a real "book tickets" / "file a claim" CTA without hardcoding
+    URLs client-side - swapping a target_url (e.g. once a real Trainline/
+    Omio affiliate account exists) never needs a frontend deploy."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    if kind:
+        cur.execute("""
+            SELECT id, kind, label FROM partner_links
+            WHERE active AND scope = 'global' AND (country_code = %s OR country_code IS NULL) AND kind = %s
+        """, (country, kind))
+    else:
+        cur.execute("""
+            SELECT id, kind, label FROM partner_links
+            WHERE active AND scope = 'global' AND (country_code = %s OR country_code IS NULL)
+        """, (country,))
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close(); conn.close()
+    return rows
+
+@app.get("/out/{link_id}")
+def outbound_click(link_id: int, request: Request):
+    """Logs the click (for affiliate reporting) then redirects. Anonymous -
+    no login exists yet, user_id stays NULL, same as any real affiliate
+    program's non-logged-in click flow."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT target_url FROM partner_links WHERE id = %s AND active", (link_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return PlainTextResponse("Link not found", status_code=404)
+    referer = request.headers.get("referer", "")
+    cur.execute(
+        "INSERT INTO outbound_clicks (partner_link_id, referer_path) VALUES (%s, %s)",
+        (link_id, referer),
+    )
+    conn.commit()
+    cur.close(); conn.close()
+    return RedirectResponse(row[0], status_code=302)

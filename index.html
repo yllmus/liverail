@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LiveRail — live European train delays</title>
 <meta name="description" content="Live train positions and delay tracking for Hungary, Austria, Poland, and Germany.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="LiveRail">
+<meta property="og:title" content="LiveRail — live European train delays">
+<meta property="og:description" content="Live train positions and delay tracking for Hungary, Austria, Poland, and Germany.">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="LiveRail — live European train delays">
+<meta name="twitter:description" content="Live train positions and delay tracking for Hungary, Austria, Poland, and Germany.">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"LiveRail","description":"Live train positions and delay tracking for Hungary, Austria, Poland, and Germany."}</script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%231d4e89' stroke-width='2.2' stroke-linecap='round'><rect x='4' y='3' width='16' height='13' rx='3'/><path d='M4 11h16'/><path d='M8 3v8'/><path d='M16 3v8'/><path d='M7 19l2-3'/><path d='M17 19l-2-3'/><path d='M6 19h12'/></svg>">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -154,7 +162,7 @@ h2{font-family:var(--font-display);font-weight:800;font-size:26px;margin:0 0 4px
 .sev-cancel .word{color:var(--sev-cancel)}
 .pos-chip{font:11px var(--font-mono);color:var(--text-faint);border:1px solid var(--line);border-radius:20px;padding:1px 7px;margin-left:6px}
 
-#map{height:640px;width:100%;background:var(--line-soft)}
+#map{height:640px;width:100%;background:var(--line-soft);isolation:isolate}
 .leaflet-popup-content-wrapper{background:var(--surface);color:var(--text);border-radius:var(--radius)}
 .leaflet-popup-tip{background:var(--surface)}
 .popup-route{font-family:var(--font-display);font-weight:800;font-size:16px}
@@ -246,6 +254,45 @@ footer.pagefoot{border-top:1px solid var(--line);padding:36px 0 30px;margin-top:
 footer.pagefoot h3{font:700 12px var(--font-mono);text-transform:uppercase;letter-spacing:.08em;color:var(--text-dim);margin:0 0 10px}
 footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;margin:0 0 6px}
 .data-tag{font:11px var(--font-mono);color:var(--text-faint);border:1px solid var(--line);border-radius:20px;padding:2px 8px}
+
+/* ---------- Simple mode: the default landing view. One question, one
+   answer, nothing else competing for attention. Everything else in this
+   app (map, rankings, compare, heatmaps) is real and stays available one
+   click away via "Advanced view" - it's just not what a first-time or
+   non-technical visitor sees first. ---------- */
+.simple-wrap{max-width:640px;margin:0 auto;padding:48px 16px 24px;text-align:center}
+.simple-title{font-family:var(--font-display);font-weight:800;font-size:clamp(28px,5vw,40px);margin:0 0 28px;letter-spacing:.2px}
+.simple-search{position:relative;max-width:520px;margin:0 auto}
+.simple-search input{width:100%;min-height:60px;padding:0 20px 0 52px;font:20px var(--font-body);
+  border:2px solid var(--line);border-radius:12px;background:var(--surface);color:var(--text)}
+.simple-search input:focus{outline:none;border-color:var(--accent)}
+.simple-search svg{position:absolute;left:18px;top:50%;transform:translateY(-50%);width:22px;height:22px;color:var(--text-faint);pointer-events:none}
+.simple-search .searchpop{left:0;right:0;font-size:17px}
+.simple-hint{font-size:15px;color:var(--text-dim);margin-top:14px}
+.simple-result{margin-top:32px;text-align:left}
+.simple-card{border:2px solid var(--line);border-radius:16px;padding:32px;text-align:center;background:var(--surface)}
+.simple-card.sev-ontime{border-color:var(--sev-ontime);background:var(--sev-ontime-bg)}
+.simple-card.sev-late{border-color:var(--sev-late);background:var(--sev-late-bg)}
+.simple-card.sev-delayed{border-color:var(--sev-delayed);background:var(--sev-delayed-bg)}
+.simple-card.sev-severe{border-color:var(--sev-severe);background:var(--sev-severe-bg)}
+.simple-card .sev-icon{width:56px;height:56px}
+.simple-card.sev-ontime .sev-icon{color:var(--sev-ontime)}
+.simple-card.sev-late .sev-icon{color:var(--sev-late)}
+.simple-card.sev-delayed .sev-icon{color:var(--sev-delayed)}
+.simple-card.sev-severe .sev-icon{color:var(--sev-severe)}
+.simple-status{font-family:var(--font-display);font-weight:800;font-size:32px;margin-top:10px}
+.simple-sub{font-size:16px;color:var(--text-dim);margin-top:6px}
+.simple-delay{font:800 44px var(--font-mono);margin-top:14px}
+.simple-plain{font-size:16px;margin-top:14px;color:var(--text)}
+.simple-actions{display:flex;flex-direction:column;gap:10px;margin-top:24px;max-width:420px;margin-left:auto;margin-right:auto}
+.simple-btn{display:block;padding:16px 20px;border-radius:10px;font:700 17px var(--font-body);text-decoration:none;
+  text-align:center;border:2px solid var(--line);color:var(--text);background:var(--surface)}
+.simple-btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.simple-btn:hover{opacity:.9}
+.simple-loading,.simple-error,.simple-empty{text-align:center;color:var(--text-dim);padding:20px;font-size:16px}
+.simple-advanced-link{margin-top:36px;font-size:14px}
+.simple-advanced-link a{color:var(--text-dim)}
+@media(max-width:640px){.simple-wrap{padding-top:28px}.simple-search input{min-height:54px;font-size:17px}.simple-delay{font-size:36px}}
 </style>
 </head>
 <body>
@@ -265,7 +312,8 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 
 <nav class="viewtabs" aria-label="Section">
   <div class="wrap">
-    <button class="vtab active" data-view="live">Live</button>
+    <button class="vtab active" data-view="simple">Find my train</button>
+    <button class="vtab" data-view="live">Advanced view</button>
     <button class="vtab" data-view="rankings">Rankings</button>
     <button class="vtab" data-view="compare">Compare</button>
   </div>
@@ -273,7 +321,21 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 
 <main class="wrap">
 
-  <section class="view active" id="view-live">
+  <section class="view active" id="view-simple">
+    <div class="simple-wrap">
+      <h1 class="simple-title">Is your train on time?</h1>
+      <div class="simple-search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3" stroke-linecap="round"/></svg>
+        <input type="text" id="simpleInput" placeholder="Type your train number or station…" autocomplete="off" aria-label="Search for your train or station">
+        <div class="searchpop" id="simplePop"></div>
+      </div>
+      <div class="simple-hint">Works for Hungary, Austria, Poland, and Germany.</div>
+      <div class="simple-result" id="simpleResult"></div>
+      <div class="simple-advanced-link"><a href="#" data-view-link="live">Prefer maps and tables? Open the advanced view →</a></div>
+    </div>
+  </section>
+
+  <section class="view" id="view-live">
     <div class="stats-strip" id="statsStrip"></div>
     <div class="live-grid">
       <div class="panel">
@@ -358,7 +420,7 @@ var META={
   PL:{label:'Poland',short:'PKP',center:[52.0,19.3],zoom:6},
   DE:{label:'Germany',short:'DB',center:[51.15,10.4],zoom:6}
 };
-var state={country:'HU',view:'live',stations:{},routes:{},countriesMeta:[],cmp:[],refreshTimer:null,map:null,markerLayer:null};
+var state={country:'HU',view:'simple',stations:{},routes:{},countriesMeta:[],cmp:[],refreshTimer:null,map:null,markerLayer:null};
 
 /* ---------- utils ---------- */
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
@@ -432,6 +494,12 @@ function setCountry(c){
   state.country=c;
   renderCountryTabs();
   document.getElementById('brandTag').textContent=(META[c].label+' · '+META[c].short);
+  // Route names aren't unique across countries (e.g. both could have a
+  // route "1") - keeping old picks would silently re-query the new
+  // country under the same-looking chip, showing misleading data.
+  state.cmp=[];
+  renderCompareChips();
+  document.getElementById('cmpResults').innerHTML='';
   loadAll();
 }
 
@@ -497,7 +565,7 @@ function renderBoard(data){
   el.innerHTML=data.trains.map(function(t){
     var sev=sevInfo(t.delay_minutes);
     var sub=(t.headsign?('→ '+esc(t.headsign)+' · '):'')+'Now at '+esc(t.current_stop_display||t.current_stop||'—');
-    return '<div class="brow '+sev.cls+'" data-train=\''+encodeURIComponent(JSON.stringify(t))+'\'>'+
+    return '<div class="brow '+sev.cls+'" data-train=\''+esc(JSON.stringify(t))+'\'>'+
       sevIconSvg(sev.cls)+
       '<div class="brow-main"><div class="brow-route">'+esc(t.route_name||t.train_number||'—')+'</div><div class="brow-sub">'+sub+'</div></div>'+
       '<div style="text-align:right"><div class="brow-status"><span class="word">'+sev.word+'</span></div><div class="brow-num">'+delayLabel(t.delay_minutes)+'</div></div>'+
@@ -505,7 +573,7 @@ function renderBoard(data){
   }).join('');
   Array.prototype.forEach.call(el.querySelectorAll('.brow'),function(row){
     row.addEventListener('click',function(){
-      var t=JSON.parse(decodeURIComponent(row.getAttribute('data-train')));
+      var t=JSON.parse(row.getAttribute('data-train'));
       openTrainDrawer(t);
     });
   });
@@ -638,6 +706,93 @@ function wireSearch(inputId,popId,onPick){
 }
 wireSearch('searchInput','searchPop',function(r){openDetail(r.type,r.name);});
 wireSearch('cmpInput','cmpPop',function(r){if(r.type==='route')addCompare(r.name);});
+
+/* ---------- simple mode ----------
+   The default landing view (see .simple-* CSS). One search box, one plain-
+   language answer card. Reuses the exact same /stations,/routes,
+   /live/board,/station/{name}/stats,/route/{name}/stats data every other
+   view already calls - this is a different presentation of the same real
+   data, not a separate parallel feature to keep in sync. */
+wireSearch('simpleInput','simplePop',function(r){showSimpleResult(r);});
+Array.prototype.forEach.call(document.querySelectorAll('[data-view-link]'),function(a){
+  a.addEventListener('click',function(e){
+    e.preventDefault();
+    var btn=document.querySelector('.vtab[data-view="'+a.getAttribute('data-view-link')+'"]');
+    if(btn)btn.click();
+  });
+});
+function simplePlainMessage(delay){
+  if(delay==null)return 'No current delay information for this train.';
+  if(delay<=2)return 'Right on schedule — no need to rush.';
+  if(delay<=10)return 'A short delay. You likely still have plenty of time.';
+  if(delay<=30)return 'A real delay. If you have a connection, check whether you’ll still make it.';
+  return 'A long delay. This may also qualify you for money back — see below.';
+}
+function simpleResultEl(){return document.getElementById('simpleResult');}
+function showSimpleResult(r){
+  simpleResultEl().innerHTML='<div class="simple-loading">Looking…</div>';
+  if(r.type==='route'){
+    var match=(boardData&&boardData.trains||[]).filter(function(t){return t.route_name===r.name||t.train_number===r.name;})[0];
+    if(match){renderSimpleLive(r.label,match);return;}
+    api('/route/'+encodeURIComponent(r.name)+'/stats',{country:state.country}).then(function(d){
+      renderSimpleHistoric(r.label,d,'This train isn’t currently running.');
+    }).catch(renderSimpleError);
+  } else {
+    api('/station/'+encodeURIComponent(r.name)+'/stats',{country:state.country}).then(function(d){
+      renderSimpleHistoric(r.label,d,'Typical reliability at this station.');
+    }).catch(renderSimpleError);
+  }
+}
+function renderSimpleError(){simpleResultEl().innerHTML='<div class="simple-error">Couldn’t load that right now. Please try again.</div>';}
+function simpleActionsHtml(){
+  return '<div class="simple-actions" id="simpleActions"></div>';
+}
+function loadSimpleActions(country,kind){
+  api('/partner-links',{country:country,kind:kind}).then(function(rows){
+    var el=document.getElementById('simpleActions');
+    if(!el||!rows.length)return;
+    el.innerHTML+=rows.map(function(p){
+      return '<a class="simple-btn" target="_blank" rel="noopener" href="'+API+'/out/'+p.id+'">'+esc(p.label)+'</a>';
+    }).join('');
+  }).catch(function(){});
+}
+function renderSimpleLive(label,t){
+  var sev=sevInfo(t.delay_minutes);
+  var html='<div class="simple-card '+sev.cls+'">'+
+    sevIconSvg(sev.cls)+
+    '<div class="simple-status">'+esc(sev.word)+'</div>'+
+    '<div class="simple-sub">'+esc(label)+(t.headsign?(' → '+esc(t.headsign)):'')+' · now at '+esc(t.current_stop_display||t.current_stop||'—')+'</div>'+
+    '<div class="simple-delay">'+delayLabel(t.delay_minutes)+'</div>'+
+    '<div class="simple-plain">'+simplePlainMessage(t.delay_minutes)+'</div>'+
+    '</div>'+simpleActionsHtml();
+  simpleResultEl().innerHTML=html;
+  loadSimpleActions(state.country,'affiliate_booking');
+  if(t.delay_minutes!=null&&t.delay_minutes>0)checkSimpleCompensation(t.delay_minutes);
+}
+function renderSimpleHistoric(label,d,framing){
+  if(!d||!d.total){simpleResultEl().innerHTML='<div class="simple-empty">No data yet for "'+esc(label)+'".</div>';return;}
+  var sev=sevInfo(d.avg_delay);
+  var html='<div class="simple-card '+sev.cls+'">'+
+    sevIconSvg(sev.cls)+
+    '<div class="simple-status">'+esc(framing)+'</div>'+
+    '<div class="simple-sub">'+esc(label)+'</div>'+
+    '<div class="simple-delay">'+fmtNum(d.avg_delay,1)+' min avg</div>'+
+    '<div class="simple-plain">'+fmtNum(d.pct_on_time,0)+'% of trains on time here, based on '+d.total+' tracked observations.</div>'+
+    '</div>'+simpleActionsHtml();
+  simpleResultEl().innerHTML=html;
+  loadSimpleActions(state.country,'affiliate_booking');
+}
+function checkSimpleCompensation(delayMinutes){
+  api('/compensation/check',{country:state.country,delay_minutes:delayMinutes}).then(function(c){
+    if(!c.eligible)return;
+    var el=document.getElementById('simpleActions');
+    if(!el)return;
+    el.insertAdjacentHTML('afterbegin',
+      '<div class="simple-plain" style="margin-bottom:4px"><b>'+esc(c.message)+'</b></div>'+
+      '<a class="simple-btn primary" target="_blank" rel="noopener" href="'+esc(c.claim_url)+'">How to claim it →</a>'
+    );
+  }).catch(function(){});
+}
 
 /* ---------- compare ---------- */
 function loadCompareList(){if(!state.routes[state.country])loadNameLists();renderCompareChips();}
