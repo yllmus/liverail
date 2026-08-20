@@ -1,5 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from html import escape as _esc
+from urllib.parse import quote as _urlquote
 import psycopg2
 import psycopg2.extras
 import requests as req
@@ -10,6 +13,8 @@ from austria_poller import call_radar, parse_at_vehicles
 from poland_poller import fetch_feed, parse_pl_vehicles, resolve_delays
 from germany_poller import fetch_feed as fetch_de_feed, parse_de_vehicles, resolve_delays as resolve_de_delays
 from station_names import clean_display_name
+from hu_route_names import clean_route_name
+from config import DB_PASSWORD
 
 app = FastAPI()
 
@@ -23,7 +28,7 @@ app.add_middleware(
 DB_CONFIG = {
     "dbname": "train_delay_db",
     "user": "trainuser",
-    "password": "changeme",
+    "password": DB_PASSWORD,
     "host": "localhost"
 }
 
@@ -94,7 +99,7 @@ def get_stations(country: str = "HU"):
     conn.close()
     return [{"name": r["name"], "display_name": r["display_name"]} for r in rows]
 
-@app.get("/station/{station_name}/delays")
+@app.get("/station/{station_name:path}/delays")
 def get_station_delays(station_name: str, country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -154,7 +159,7 @@ def _routes_summary_query(country):
 def get_routes_summary(country: str = "HU"):
     return _cached_summary("routes", country, lambda: _routes_summary_query(country))
 
-@app.get("/route/{route_name}/delays")
+@app.get("/route/{route_name:path}/delays")
 def get_route_delays(route_name: str, country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -172,7 +177,7 @@ def get_route_delays(route_name: str, country: str = "HU"):
     conn.close()
     return row
 
-@app.get("/route/{route_name}/stats")
+@app.get("/route/{route_name:path}/stats")
 def get_route_stats(route_name: str, country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -206,7 +211,7 @@ def get_route_stats(route_name: str, country: str = "HU"):
     cur.close(); conn.close()
     return {**dict(summary), "by_hour": by_hour, "by_dow": by_dow}
 
-@app.get("/station/{station_name}/stats")
+@app.get("/station/{station_name:path}/stats")
 def get_station_stats(station_name: str, country: str = "HU"):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -610,7 +615,7 @@ def get_live_hu():
         prev = v.get("prevOrCurrentStop")
         if not trip or not stop_rel or not prev:
             continue
-        route_name = trip.get("route", {}).get("longName")
+        route_name = clean_route_name(trip.get("route", {}).get("longName"), trip.get("tripShortName"))
         stop_name = stop_rel.get("stop", {}).get("name")
         delay_sec = prev.get("arrivalDelay") or prev.get("departureDelay") or 0
         if not route_name or not stop_name:
@@ -653,3 +658,169 @@ def get_live_hu():
         })
 
     return result
+
+# --- SEO / growth surface ---------------------------------------------
+# Everything above this line is the JSON API the LiveRail SPA (index.html)
+# consumes - a single client-rendered page with no per-entity URLs, which
+# search engines have nothing to index and nothing distinct to rank. These
+# endpoints render plain server-side HTML per station/route so each one is
+# a real, crawlable, shareable URL - the foundation SEO/social growth needs
+# (see MONETIZATION_READINESS.md). Deliberately minimal (no JS, no build
+# step, inline styling) - this is a landing page for search engines and
+# link previews, not a UI; the "Open the live map" link sends a real human
+# straight into the interactive SPA.
+#
+# Absolute URLs (canonical/OG/sitemap) are built from the incoming
+# request's own Host header rather than a hardcoded domain - this project
+# already broke production once by hardcoding a host that changed (see
+# NOTES.md's "Outage found and fixed 2026-08-02"); this endpoint set
+# deliberately doesn't repeat that.
+
+_COUNTRY_NAMES = {"HU": "Hungary", "AT": "Austria", "PL": "Poland", "DE": "Germany"}
+
+def _base_url(request: Request) -> str:
+    return f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
+
+def _seo_page(request: Request, title: str, description: str, path: str, body_html: str, json_ld: dict = None) -> str:
+    base = _base_url(request)
+    canonical = f"{base}{path}"
+    json_ld_tag = ""
+    if json_ld is not None:
+        import json as _json
+        # station/route names are GTFS data, not user input, but this is
+        # cheap insurance: json.dumps doesn't escape "</script>", which
+        # would otherwise let a value like that break out of the tag.
+        safe_json = _json.dumps(json_ld).replace("</", "<\\/")
+        json_ld_tag = f'<script type="application/ld+json">{safe_json}</script>'
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{_esc(title)}</title>
+<meta name="description" content="{_esc(description)}">
+<link rel="canonical" href="{_esc(canonical)}">
+<meta property="og:type" content="website">
+<meta property="og:title" content="{_esc(title)}">
+<meta property="og:description" content="{_esc(description)}">
+<meta property="og:url" content="{_esc(canonical)}">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="{_esc(title)}">
+<meta name="twitter:description" content="{_esc(description)}">
+<style>
+body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;color:#1b1d22;line-height:1.5}}
+a{{color:#1d4e89}} table{{border-collapse:collapse;width:100%;margin:1rem 0}}
+td,th{{text-align:left;padding:.35rem .6rem;border-bottom:1px solid #e1e6e8}}
+.cta{{display:inline-block;margin-top:1rem;padding:.6rem 1.1rem;background:#1d4e89;color:#fff;border-radius:4px;text-decoration:none}}
+footer{{margin-top:2rem;font-size:.85rem;color:#565c64}}
+</style>
+{json_ld_tag}
+</head>
+<body>
+{body_html}
+<footer>Live delay tracking, rankings, and route comparison for Hungary, Austria, Poland, and Germany — <a href="/">open the live map</a>.</footer>
+</body>
+</html>"""
+
+@app.get("/t/{country}/station/{name:path}", response_class=HTMLResponse)
+def seo_station_page(request: Request, country: str, name: str):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT s.display_name,
+               COUNT(o.id) as total,
+               ROUND(100.0 * SUM(CASE WHEN o.delay_minutes <= 2 THEN 1 ELSE 0 END) / NULLIF(COUNT(o.id), 0)::numeric, 1) as pct_on_time,
+               ROUND(AVG(o.delay_minutes)::numeric, 1) as avg_delay
+        FROM stations s
+        LEFT JOIN delay_observations o ON o.station_id = s.id
+        WHERE s.name = %s AND s.country_code = %s
+        GROUP BY s.display_name
+    """, (name, country))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row:
+        return HTMLResponse(_seo_page(request, "Station not found", "This station isn't in our data.", request.url.path, "<h1>Station not found</h1>"), status_code=404)
+    display = row["display_name"] or name
+    country_name = _COUNTRY_NAMES.get(country, country)
+    title = f"{display} train delays — {country_name} | LiveRail"
+    if row["total"]:
+        description = f"{display} ({country_name}): {row['pct_on_time']}% of trains on time, {row['avg_delay']} min average delay, based on {row['total']} tracked observations."
+    else:
+        description = f"Live and historical train delay tracking for {display}, {country_name}."
+    body = f"""<h1>{_esc(display)}</h1>
+<p>{_esc(country_name)} — live and historical train delay tracking.</p>
+<table>
+<tr><th>Observations tracked</th><td>{row['total'] or 0}</td></tr>
+<tr><th>On-time rate (≤2 min)</th><td>{row['pct_on_time'] if row['pct_on_time'] is not None else '—'}%</td></tr>
+<tr><th>Average delay</th><td>{row['avg_delay'] if row['avg_delay'] is not None else '—'} min</td></tr>
+</table>
+<a class="cta" href="/?country={_esc(country)}&station={_esc(name)}">Open live map for {_esc(display)}</a>"""
+    json_ld = {
+        "@context": "https://schema.org",
+        "@type": "TrainStation",
+        "name": display,
+        "address": {"@type": "PostalAddress", "addressCountry": country},
+    }
+    return _seo_page(request, title, description, request.url.path, body, json_ld)
+
+@app.get("/t/{country}/route/{name:path}", response_class=HTMLResponse)
+def seo_route_page(request: Request, country: str, name: str):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT COUNT(*) as total,
+               ROUND(100.0 * SUM(CASE WHEN delay_minutes <= 2 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)::numeric, 1) as pct_on_time,
+               ROUND(AVG(delay_minutes)::numeric, 1) as avg_delay
+        FROM delay_observations
+        WHERE route_name = %s AND country_code = %s
+    """, (name, country))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row or not row["total"]:
+        return HTMLResponse(_seo_page(request, "Route not found", "This route isn't in our data.", request.url.path, "<h1>Route not found</h1>"), status_code=404)
+    country_name = _COUNTRY_NAMES.get(country, country)
+    title = f"{name} delays — {country_name} | LiveRail"
+    description = f"{name} ({country_name}): {row['pct_on_time']}% of trains on time, {row['avg_delay']} min average delay, based on {row['total']} tracked observations."
+    body = f"""<h1>{_esc(name)}</h1>
+<p>{_esc(country_name)} — live and historical train delay tracking.</p>
+<table>
+<tr><th>Observations tracked</th><td>{row['total']}</td></tr>
+<tr><th>On-time rate (≤2 min)</th><td>{row['pct_on_time']}%</td></tr>
+<tr><th>Average delay</th><td>{row['avg_delay']} min</td></tr>
+</table>
+<a class="cta" href="/?country={_esc(country)}&route={_esc(name)}">Open live map for {_esc(name)}</a>"""
+    json_ld = {
+        "@context": "https://schema.org",
+        "@type": "TrainTrip",
+        "name": name,
+    }
+    return _seo_page(request, title, description, request.url.path, body, json_ld)
+
+@app.get("/sitemap.xml")
+def sitemap(request: Request):
+    # Reuses the same _cached_summary()-wrapped queries /stations and
+    # /routes already use - a fresh uncached DISTINCT route_name scan
+    # across all four countries' delay_observations hit the exact
+    # whole-table-scan timeout already documented in NOTES.md's Compare/
+    # Rankings bugfix notes (PL/HU: seconds-to-timeout, not milliseconds).
+    base = _base_url(request)
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    urls = [f"{base}/"]
+    for country in _COUNTRY_NAMES:
+        cur.execute("SELECT name FROM stations WHERE country_code = %s AND display_name IS NOT NULL", (country,))
+        for r in cur.fetchall():
+            urls.append(f"{base}/t/{country}/station/{_urlquote(r['name'])}")
+        for name in _cached_summary("routes_list", country, lambda c=country: _routes_query(c)):
+            if name:
+                urls.append(f"{base}/t/{country}/route/{_urlquote(name)}")
+    cur.close(); conn.close()
+    body = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    body += [f"<url><loc>{_esc(u)}</loc></url>" for u in urls]
+    body.append("</urlset>")
+    return PlainTextResponse("\n".join(body), media_type="application/xml")
+
+@app.get("/robots.txt")
+def robots_txt(request: Request):
+    base = _base_url(request)
+    return PlainTextResponse(f"User-agent: *\nAllow: /\nSitemap: {base}/sitemap.xml\n")
