@@ -360,6 +360,7 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 .dep-delay.sev-ontime{color:var(--sev-ontime)}.dep-delay.sev-late{color:var(--sev-late)}
 .dep-delay.sev-delayed{color:var(--sev-delayed)}.dep-delay.sev-severe{color:var(--sev-severe)}
 .rank-loading{padding:18px;color:var(--text-dim);font-size:14px}
+.attrib-time{font-size:12px;color:var(--text-dim);margin-top:6px}
 @media(max-width:640px){.simple-wrap{padding-top:28px}.simple-search input{min-height:54px;font-size:17px}.simple-delay{font-size:36px}
   .track-id{font-size:24px}.track-journey,.track-stats{padding:18px 16px}.dep-row{padding:12px 16px}
   .jstop{grid-template-columns:18px 1fr auto;gap:8px}.jdelay{display:none}}
@@ -597,7 +598,15 @@ function renderAttrib(){
   var row=state.countriesMeta.filter(function(r){return r.code===state.country;})[0];
   var box=document.getElementById('attribBox');
   var txt=row&&row.attribution;
-  box.innerHTML='<div class="attrib">'+(txt?esc(txt):(state.country==='HU'?'Schedule &amp; live data: MÁV.':'—'))+'</div>';
+  // PKP PLK's reuse terms require stating when the data was obtained, not
+  // just its source, so the live feed's retrieval time is rendered with the
+  // attribution (shown for every country - it's true and useful everywhere).
+  var got=state.retrievedAt?('<div class="attrib-time">Live data retrieved '+esc(fmtRetrieved(state.retrievedAt))+'</div>'):'';
+  box.innerHTML='<div class="attrib">'+(txt?esc(txt):(state.country==='HU'?'Schedule &amp; live data: MÁV.':'—'))+'</div>'+got;
+}
+function fmtRetrieved(iso){
+  try{var d=new Date(iso);return d.toLocaleString(undefined,{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'});}
+  catch(e){return iso;}
 }
 
 /* ---------- stats strip ---------- */
@@ -622,6 +631,7 @@ function loadBoard(){
   var q=document.getElementById('boardFilter').value;
   return api('/live/board',{country:state.country,limit:250,q:q}).then(function(data){
     boardData=data;
+    if(data.meta&&data.meta.retrieved_at){state.retrievedAt=data.meta.retrieved_at;renderAttrib();}
     renderStats(data.meta);
     renderBoard(data);
   }).catch(function(){

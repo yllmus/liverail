@@ -43,7 +43,26 @@ def get_conn():
 
 COUNTRY_ATTRIBUTION = {
     "AT": "Data: ÖBB (data.oebb.at), CC BY 4.0",
-    "PL": "Data: PKP PLK (public sector data), via mkuran.pl",
+    # PL was a placeholder ("Data: PKP PLK (public sector data), via
+    # mkuran.pl") from launch until 2026-08-20, flagged as unresolved in
+    # NOTES.md. The real terms, fetched from the sources themselves:
+    #   - mkuran.pl licenses the realtime feed this project polls
+    #     (polish_trains/updates.pb) as CC BY 4.0 *plus* PKP PLK's public
+    #     sector terms. CC BY requires crediting the author, which the old
+    #     string did not do at all.
+    #   - the static feed (polish_trains.zip) carries PKP PLK's *and*
+    #     Koleje Mazowieckie's public sector terms; KM was never credited.
+    #   - PKP PLK's own reuse page (bip.plk-sa.pl/ponowne-wykorzystywanie)
+    #     requires stating "dokladnego zrodla, czasu wytworzenia i
+    #     pozyskania informacji" - the exact source AND when the data was
+    #     obtained. That last part is why /live/board returns retrieved_at
+    #     and the frontend renders it next to this text.
+    "PL": (
+        "Schedules: PKP Polskie Linie Kolejowe S.A. and Koleje Mazowieckie, "
+        "reused as public sector information under Poland's Open Data Act "
+        "(11 Aug 2021). Live delays: mkuran.pl (Mikołaj Kuranowski), "
+        "CC BY 4.0, derived from PKP PLK. Provided as is, without warranty."
+    ),
     "DE": "Data: DELFI e.V., via gtfs.de - schedule CC BY 4.0, realtime CC BY-SA 4.0",
 }
 
@@ -627,6 +646,11 @@ def get_live_board(country: str = "HU", limit: int = 300, q: str = ""):
             "with_position": len(positioned),
             "position_sources": sources,
             "attribution": COUNTRY_ATTRIBUTION.get(country),
+            # PKP PLK's reuse terms require stating when the information was
+            # obtained, not just its source - see COUNTRY_ATTRIBUTION. Emitted
+            # for every country because it costs nothing and is honest
+            # everywhere; the frontend renders it beside the attribution.
+            "retrieved_at": datetime.now().isoformat(timespec="seconds"),
         },
         "trains": trains,
     }
