@@ -43,3 +43,8 @@
 !schema/partner_links_seed.sql
 !robots.txt
 !monitor.py
+!trip_resolution.py
+!at_route_names.py
+!tests/test_trip_resolution.py
+!schema/002_service_calendar.sql
+!schema/003_trip_short_name.sql

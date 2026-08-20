@@ -4,6 +4,7 @@ import psycopg2
 from datetime import date
 
 from hu_route_names import clean_route_name, extract_train_number
+from trip_resolution import resolve_ambiguous_trip, local_now
 from config import DB_PASSWORD
 
 DB_CONFIG = {
@@ -75,7 +76,7 @@ def parse_vehicles(data):
         })
     return rows
 
-def resolve_trip_id(cur, number):
+def resolve_trip_id(cur, number, station_name=None, delay_minutes=None, now=None):
     # MAV's live gtfsId (e.g. "1:33736070") is an OTP-internal identifier -
     # confirmed directly against the live endpoint + our imported static
     # feed that it shares no formatting or numbering scheme with
@@ -89,24 +90,21 @@ def resolve_trip_id(cur, number):
     # route_type='2' (rail) so a train number doesn't collide with a
     # "Pótló" rail-replacement-BUS route reusing the same number.
     #
-    # Verified against a real 314-vehicle live sample (2026-08-20): this
-    # resolves a single unambiguous trip for ~25% of vehicles (77/314).
-    # The rest don't get a guess - left NULL, same graceful-skip convention
-    # as PL/AT/DE's unresolved rows - because the other ~75% is a real,
-    # confirmed structural gap this query can't close:
-    #   - ~37% (116/314): no route in our static import contains the
-    #     number at all. Partly HÉV lines (H6/H7/H8/...), which aren't in
-    #     MAV's own GTFS feed - a different agency - and partly genuine
-    #     schedule drift against our one-time static snapshot.
-    #   - ~38% (121/314): the number matches more than one candidate trip.
-    #     Most HU routes are imported one-per-LINE (e.g. "S76" covers every
-    #     physical train on that line all day), not one-per-physical-train,
-    #     and MAV's own trip_short_name column is 0/34,349 filled in the
-    #     source feed itself - there's no calendar/stop_times data imported
-    #     for HU to disambiguate further by time of day. Closing this gap
-    #     for real would mean importing HU's stop_times.txt (already on
-    #     disk, unused) and matching by scheduled time, mirroring PL's
-    #     architecture - not attempted here, real follow-on scope.
+    # First pass (2026-08-20, pre-calendar) resolved ~25% (77/314) - a bare
+    # number match, alone, is ambiguous for ~38% of vehicles because most HU
+    # routes are imported one-per-LINE (e.g. "S76" covers every physical
+    # train on the line all day) and MAV's own trip_short_name column is
+    # 0/34,349 filled, so there was nothing to disambiguate by time of day.
+    # Importing stop_times.txt didn't fix that alone: candidates for the same
+    # number turned out to have *identical* scheduled times (they're one
+    # physical service duplicated once per GTFS service_id/calendar
+    # pattern). Importing calendar.txt (service_calendar table) and matching
+    # against "which service runs today", then falling back to nearest
+    # scheduled time at the observed station if still tied
+    # (resolve_ambiguous_trip, trip_resolution.py), raised this to 60.5%.
+    # The remaining ~40% is a real, confirmed structural gap: mostly HÉV
+    # lines (H6/H7/H8/...), a different agency not in MAV's own GTFS feed at
+    # all, plus genuine schedule drift against the one-time static snapshot.
     if not number:
         return None
     cur.execute("""
@@ -115,8 +113,12 @@ def resolve_trip_id(cur, number):
         WHERE r.country_code = %s AND r.route_type = '2'
           AND r.name ~ %s
     """, (COUNTRY_CODE, r"(^|[^0-9])" + re.escape(number) + r"([^0-9]|$)"))
-    matches = cur.fetchall()
-    return matches[0][0] if len(matches) == 1 else None
+    matches = [m[0] for m in cur.fetchall()]
+    # Ambiguous-match narrowing (same-day calendar, then nearest scheduled
+    # time at the observed station) is shared with austria_poller.py - see
+    # trip_resolution.py.
+    station_names = [station_name] if station_name else None
+    return resolve_ambiguous_trip(cur, COUNTRY_CODE, matches, station_names, delay_minutes, now)
 
 def poll():
     conn = psycopg2.connect(**DB_CONFIG)
@@ -136,7 +138,7 @@ def poll():
         # estimate PL/DE fall back to) - tagged explicitly so a consumer
         # never has to guess which kind of position a row holds.
         position_source = "live" if row["lat"] is not None else None
-        trip_id = resolve_trip_id(cur, row["train_number"])
+        trip_id = resolve_trip_id(cur, row["train_number"], row["stop_name"], row["delay_minutes"], local_now(COUNTRY_CODE))
         if trip_id is not None:
             resolved_count += 1
         cur.execute("""

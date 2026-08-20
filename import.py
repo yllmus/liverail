@@ -4,7 +4,17 @@ import pandas as pd
 import psycopg2
 
 from station_names import clean_display_name
+
 from config import DB_PASSWORD
+
+
+def _gtfs_date(value):
+    # GTFS dates are "YYYYMMDD" strings; NULL through if absent so an open-
+    # ended service doesn't become a bogus date.
+    if not value or not str(value).strip():
+        return None
+    text = str(value).strip()
+    return f"{text[0:4]}-{text[4:6]}-{text[6:8]}" if len(text) == 8 else None
 
 DB_CONFIG = {
     "dbname": "train_delay_db",
@@ -181,13 +191,43 @@ trips = pd.read_csv(f"{gtfs_dir}/trips.txt", dtype=str)
 for _, row in trips.iterrows():
     headsign = _clean(row.get("trip_headsign"))
     cur.execute("""
-        INSERT INTO trips (route_id, gtfs_trip_id, country_code, headsign)
-        SELECT r.id, %s, %s, %s FROM routes r WHERE r.gtfs_route_id = %s AND r.country_code = %s
+        INSERT INTO trips (route_id, gtfs_trip_id, country_code, headsign, service_id, trip_short_name)
+        SELECT r.id, %s, %s, %s, %s, %s FROM routes r WHERE r.gtfs_route_id = %s AND r.country_code = %s
         ON CONFLICT (country_code, gtfs_trip_id) DO UPDATE SET
-            headsign = EXCLUDED.headsign, route_id = EXCLUDED.route_id
-    """, (row["trip_id"], country, headsign, args.route_id_prefix + row["route_id"], country))
+            headsign = EXCLUDED.headsign, route_id = EXCLUDED.route_id,
+            service_id = EXCLUDED.service_id,
+            trip_short_name = EXCLUDED.trip_short_name
+    """, (row["trip_id"], country, headsign, _clean(row.get("service_id")),
+          _clean(row.get("trip_short_name")),
+          args.route_id_prefix + row["route_id"], country))
 conn.commit()
 print(f"Imported {len(trips)} trips.")
+
+# calendar.txt: which days each service_id actually runs. Needed because a
+# train number alone matches many candidate trips that are the *same* service
+# duplicated per calendar pattern - identical scheduled times, so nothing but
+# the calendar can separate them (see schema/002_service_calendar.sql).
+# Optional: not every feed ships calendar.txt, and a missing one degrades
+# resolution rather than failing the import.
+_calendar_path = f"{gtfs_dir}/calendar.txt"
+if os.path.exists(_calendar_path):
+    print(f"Importing calendar for {country}...")
+    calendar = pd.read_csv(_calendar_path, dtype=str)
+    _days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    for _, row in calendar.iterrows():
+        cur.execute(f"""
+            INSERT INTO service_calendar
+                (country_code, service_id, {', '.join(_days)}, start_date, end_date)
+            VALUES (%s, %s, {', '.join(['%s'] * 7)}, %s, %s)
+            ON CONFLICT (country_code, service_id) DO UPDATE SET
+                {', '.join(f'{d} = EXCLUDED.{d}' for d in _days)},
+                start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date
+        """, (country, row["service_id"], *[row.get(d) == "1" for d in _days],
+              _gtfs_date(row.get("start_date")), _gtfs_date(row.get("end_date"))))
+    conn.commit()
+    print(f"Imported {len(calendar)} calendar entries.")
+else:
+    print(f"No calendar.txt in {gtfs_dir}, skipping calendar import.")
 
 if args.with_stop_times:
     print(f"Importing stop_times for {country}...")

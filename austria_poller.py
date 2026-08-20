@@ -4,6 +4,8 @@ import subprocess
 import psycopg2
 from datetime import date
 
+from at_route_names import extract_at_train_number
+from trip_resolution import resolve_ambiguous_trip, local_now
 from config import DB_PASSWORD
 
 DB_CONFIG = {
@@ -39,6 +41,29 @@ def station_name_candidates(name):
             seen.add(c)
             result.append(c)
     return result
+
+def resolve_trip_id(cur, number, stop_name=None, delay_minutes=None, now=None):
+    # AT's live radar() tripId is a HAFAS-internal composite key with no
+    # relationship to trips.gtfs_trip_id (see NOTES.md "Live per-train
+    # identity" - confirmed structural, not a staleness issue, same as HU's
+    # gtfsId problem). NOTES.md had concluded AT was unfixable on the
+    # strength of HAFAS's line.fahrtNr being 0/652 filled - but that's a
+    # different field. The live line *name* itself ("RJX 639") already
+    # carries the train's public number, in the same "CATEGORY NUMBER"
+    # order as the static feed's own trip_short_name (confirmed: 14,690/
+    # 15,165 AT trips have it filled, e.g. "RJ 658", "REX 7013") - so the
+    # same number-then-calendar-then-schedule resolution HU uses (see
+    # poller.py's resolve_trip_id, factored into trip_resolution.py) applies
+    # here too, just matched against trip_short_name instead of routes.name.
+    if not number:
+        return None
+    cur.execute("""
+        SELECT id FROM trips
+        WHERE country_code = %s AND trip_short_name ~ %s
+    """, (COUNTRY_CODE, r"(^|[^0-9])" + re.escape(number) + r"([^0-9]|$)"))
+    matches = [m[0] for m in cur.fetchall()]
+    station_names = station_name_candidates(stop_name) if stop_name else None
+    return resolve_ambiguous_trip(cur, COUNTRY_CODE, matches, station_names, delay_minutes, now)
 
 def call_radar():
     result = subprocess.run(
@@ -104,6 +129,10 @@ def parse_at_vehicles(movements):
             # mismatch). Stored opaque/unresolved, same convention as HU -
             # see NOTES.md "Live per-train identity".
             "live_trip_id": m.get("tripId"),
+            # See resolve_trip_id() below - a second, independent identity
+            # path that (unlike live_trip_id/tripId) can sometimes actually
+            # join to our static trips table.
+            "train_number": extract_at_train_number(route_name),
         })
     return rows
 
@@ -115,23 +144,27 @@ def poll():
     rows = parse_at_vehicles(movements)
     print(f"Got {len(rows)} vehicles")
     count = 0
+    resolved_count = 0
     for row in rows:
         print(f"  {row['route_name']} at {row['stop_name']}: {row['delay_minutes']}")
         # Real GPS straight off HAFAS's radar (not the schedule-interpolated
         # estimate PL/DE fall back to) - tagged explicitly so a consumer
         # never has to guess which kind of position a row holds.
         position_source = "live" if row["lat"] is not None else None
+        trip_id = resolve_trip_id(cur, row["train_number"], row["stop_name"], row["delay_minutes"], local_now(COUNTRY_CODE))
+        if trip_id is not None:
+            resolved_count += 1
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id)
-            SELECT s.id, %s, NOW(), %s, false, %s, %s, %s, %s, %s, %s, %s
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id, trip_id)
+            SELECT s.id, %s, NOW(), %s, false, %s, %s, %s, %s, %s, %s, %s, %s
             FROM stations s
             WHERE s.name = ANY(%s) AND s.country_code = %s
             ORDER BY array_position(%s, s.name)
             LIMIT 1
         """, (
             date.today(), row["delay_minutes"], row["route_name"], COUNTRY_CODE,
-            row["headsign"], row["lat"], row["lon"], position_source, row["live_trip_id"],
+            row["headsign"], row["lat"], row["lon"], position_source, row["live_trip_id"], trip_id,
             station_name_candidates(row["stop_name"]), COUNTRY_CODE,
             station_name_candidates(row["stop_name"]),
         ))
@@ -139,7 +172,7 @@ def poll():
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Saved {count} observations.")
+    print(f"Saved {count} observations, {resolved_count} with a resolved trip_id.")
 
 if __name__ == "__main__":
     poll()
