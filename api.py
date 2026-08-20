@@ -396,7 +396,7 @@ GRAPHQL_QUERY = """
       tripShortName
       tripHeadsign
       route { longName }
-      stoptimes { stop { name lat lon } scheduledDeparture departureDelay }
+      stoptimes { stop { name lat lon } scheduledDeparture departureDelay scheduledArrival arrivalDelay }
     }
     stopRelationship { stop { name lat lon } status }
     prevOrCurrentStop { arrivalDelay departureDelay }
@@ -683,11 +683,31 @@ def get_live_hu():
         for i, st in enumerate(raw_stops):
             stop_info = st.get("stop") or {}
             name = stop_info.get("name") or ""
-            dep_delay = st.get("departureDelay") or 0
+            # A train doesn't depart its final stop, so MÁV reports
+            # departureDelay 0 there - which rendered a 52-minutes-late train
+            # as arriving "on time" at its destination, the one stop a rider
+            # cares most about. Use the arrival figures for the last stop.
+            is_last = i == len(raw_stops) - 1
+            if is_last and st.get("arrivalDelay") is not None:
+                delay_sec_stop = st.get("arrivalDelay")
+                sched = st.get("scheduledArrival")
+            else:
+                delay_sec_stop = st.get("departureDelay") or 0
+                sched = st.get("scheduledDeparture")
+            # Checked against the raw feed: MÁV reports 0 for *both* arrival and
+            # departure delay at a trip's final stop even when the train is
+            # running an hour late (every intermediate stop carries the real
+            # figure). That's the feed declining to predict the final arrival,
+            # not a prediction of punctuality - so it's reported as unknown
+            # rather than telling a rider on a 52-late train that it arrives on
+            # time, which is the one stop they care most about.
+            stop_delay_min = round(delay_sec_stop / 60, 1)
+            if is_last and stop_delay_min == 0 and (delay_sec or 0) / 60 > 2:
+                stop_delay_min = None
             stops.append({
                 "name": name,
-                "dep": _fmt_time(st.get("scheduledDeparture")),
-                "delay_min": round(dep_delay / 60, 1),
+                "dep": _fmt_time(sched),
+                "delay_min": stop_delay_min,
                 # Carried so /train/HU/{id} can draw the journey on a map,
                 # the same way AT's stopovers and PL/DE's stations do.
                 "lat": stop_info.get("lat"),

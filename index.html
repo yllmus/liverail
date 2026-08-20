@@ -292,7 +292,77 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 .simple-loading,.simple-error,.simple-empty{text-align:center;color:var(--text-dim);padding:20px;font-size:16px}
 .simple-advanced-link{margin-top:36px;font-size:14px}
 .simple-advanced-link a{color:var(--text-dim)}
-@media(max-width:640px){.simple-wrap{padding-top:28px}.simple-search input{min-height:54px;font-size:17px}.simple-delay{font-size:36px}}
+
+/* ---- the tracker: one train, its whole journey ---- */
+.spinner{display:inline-block;width:14px;height:14px;margin-right:8px;vertical-align:-2px;
+  border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.sres .ssub{font-size:12px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sres .sres-meta{margin-left:auto;font:700 12px var(--font-mono);white-space:nowrap}
+.sres .stag-train{color:var(--accent-ink);background:var(--accent);border-radius:4px;padding:2px 5px}
+.sres-meta.sev-ontime{color:var(--sev-ontime)}.sres-meta.sev-late{color:var(--sev-late)}
+.sres-meta.sev-delayed{color:var(--sev-delayed)}.sres-meta.sev-severe{color:var(--sev-severe)}
+.track{text-align:left;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:var(--surface)}
+.track-head{padding:26px 26px 22px;text-align:center;border-bottom:1px solid var(--line)}
+.track-head.sev-ontime{background:var(--sev-ontime-bg)}.track-head.sev-late{background:var(--sev-late-bg)}
+.track-head.sev-delayed{background:var(--sev-delayed-bg)}.track-head.sev-severe{background:var(--sev-severe-bg)}
+.track-id{font-family:var(--font-display);font-weight:800;font-size:30px;line-height:1.15}
+.track-sub{font-size:15px;color:var(--text-dim);margin-top:6px}
+.track-status{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:16px;
+  font-family:var(--font-display);font-weight:800;font-size:22px}
+.track-status .sev-icon{width:28px;height:28px}
+.track-head.sev-ontime .sev-icon{color:var(--sev-ontime)}.track-head.sev-late .sev-icon{color:var(--sev-late)}
+.track-head.sev-delayed .sev-icon{color:var(--sev-delayed)}.track-head.sev-severe .sev-icon{color:var(--sev-severe)}
+.track-delay{font:800 22px var(--font-mono)}
+.track-now{margin-top:10px;font-size:15px}
+.track-plain{margin-top:10px;font-size:15px;color:var(--text)}
+.track-map{height:240px;width:100%;border-bottom:1px solid var(--line)}
+.track-journey,.track-stats{padding:22px 26px}
+.track-journey h3,.track-stats h3{font-family:var(--font-display);font-size:15px;text-transform:uppercase;
+  letter-spacing:.06em;color:var(--text-dim);margin:0 0 14px}
+.track-scope{font-size:13px;color:var(--text-dim);margin:-6px 0 14px}
+.track-empty{padding:22px 26px;color:var(--text-dim);font-size:15px}
+.journey{list-style:none;margin:0;padding:0}
+.jstop{display:grid;grid-template-columns:18px 1fr auto auto;align-items:center;gap:12px;padding:9px 0;
+  border-bottom:1px solid var(--line-soft);position:relative}
+.jstop:last-child{border-bottom:none}
+.jdot{width:11px;height:11px;border-radius:50%;border:2px solid var(--line);background:var(--surface);margin-left:3px;position:relative}
+/* the connecting line between stops */
+.jstop:not(:last-child) .jdot:after{content:'';position:absolute;left:50%;top:11px;width:2px;height:calc(100% + 18px);
+  background:var(--line);transform:translateX(-50%)}
+.jstop.passed .jdot{background:var(--line);border-color:var(--line)}
+.jstop.passed .jname,.jstop.passed .jtimes{color:var(--text-dim)}
+.jstop.current .jdot{border-color:var(--accent);background:var(--accent);box-shadow:0 0 0 4px var(--line-soft)}
+.jstop.current{font-weight:700}
+.jname{font-size:15px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.jplat{font:600 11px var(--font-mono);color:var(--text-dim);margin-left:8px}
+.jtimes{font:600 14px var(--font-mono);white-space:nowrap;display:flex;gap:7px;align-items:baseline}
+.jsched.struck{text-decoration:line-through;color:var(--text-dim);font-weight:400}
+.jexp.sev-late{color:var(--sev-late)}.jexp.sev-delayed{color:var(--sev-delayed)}.jexp.sev-severe{color:var(--sev-severe)}
+.jdelay{font:700 12px var(--font-mono);min-width:56px;text-align:right;white-space:nowrap}
+.jdelay.sev-ontime{color:var(--sev-ontime)}.jdelay.sev-late{color:var(--sev-late)}
+.jdelay.sev-delayed{color:var(--sev-delayed)}.jdelay.sev-severe{color:var(--sev-severe)}
+.track-stats{border-top:1px solid var(--line)}
+.track-stat-row{display:flex;gap:14px;flex-wrap:wrap}
+.track-stat{flex:1 1 110px;border:1px solid var(--line);border-radius:10px;padding:12px;text-align:center}
+.track-stat b{display:block;font:800 22px var(--font-mono)}
+.track-stat span{font-size:12px;color:var(--text-dim)}
+.track-stat-note{margin-top:12px;font-size:13px;color:var(--text-dim)}
+.track .simple-actions{padding:0 26px 24px;max-width:none}
+.deps{list-style:none;margin:0;padding:0}
+.dep-row{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:14px 26px;
+  border-bottom:1px solid var(--line-soft);cursor:pointer}
+.dep-row:last-child{border-bottom:none}
+.dep-row:hover{background:var(--line-soft)}
+.dep-id{font:700 15px var(--font-mono)}
+.dep-to{font-size:14px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dep-delay{font:700 13px var(--font-mono);white-space:nowrap}
+.dep-delay.sev-ontime{color:var(--sev-ontime)}.dep-delay.sev-late{color:var(--sev-late)}
+.dep-delay.sev-delayed{color:var(--sev-delayed)}.dep-delay.sev-severe{color:var(--sev-severe)}
+.rank-loading{padding:18px;color:var(--text-dim);font-size:14px}
+@media(max-width:640px){.simple-wrap{padding-top:28px}.simple-search input{min-height:54px;font-size:17px}.simple-delay{font-size:36px}
+  .track-id{font-size:24px}.track-journey,.track-stats{padding:18px 16px}.dep-row{padding:12px 16px}
+  .jstop{grid-template-columns:18px 1fr auto;gap:8px}.jdelay{display:none}}
 </style>
 </head>
 <body>
@@ -587,10 +657,13 @@ function initMap(){
   applyTileTheme();
   state.markerLayer=L.layerGroup().addTo(state.map);
 }
+function basemapUrl(){
+  var dark=(document.documentElement.getAttribute('data-theme')==='dark')||(!document.documentElement.getAttribute('data-theme')&&window.matchMedia('(prefers-color-scheme: dark)').matches);
+  return dark?'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png':'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+}
 function applyTileTheme(){
   if(!state.tileLayer)return;
-  var dark=(document.documentElement.getAttribute('data-theme')==='dark')||(!document.documentElement.getAttribute('data-theme')&&window.matchMedia('(prefers-color-scheme: dark)').matches);
-  var url=dark?'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png':'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+  var url=basemapUrl();
   state.tileLayer.setUrl(url);
   state.tileLayer.options.attribution='&copy; OpenStreetMap contributors &copy; CARTO';
 }
@@ -623,17 +696,33 @@ function renderPositions(rows){
 
 /* ---------- rankings ---------- */
 var rankState={station:{sort:'pct_on_time',dir:-1,data:[]},route:{sort:'pct_on_time',dir:-1,data:[]}};
+function rankLoading(kind,label){
+  // These aggregate millions of rows. The API keeps them warm in the
+  // background so this is normally instant, but on a cold cache it can take
+  // ~30s - and an empty table with no message is indistinguishable from a
+  // broken one, which is exactly how this got reported as "Rankings is just
+  // blank". Always say something.
+  document.getElementById(kind+'RankCount').textContent='';
+  document.getElementById(kind+'RankTbl').innerHTML=
+    '<thead></thead><tbody><tr><td class="rank-loading"><span class="spinner"></span>Loading '+label+
+    ' — this can take up to a minute the first time.</td></tr></tbody>';
+}
 function loadRankings(){
-  api('/stations/summary',{country:state.country}).then(function(rows){
+  var forCountry=state.country;
+  rankLoading('station','stations');rankLoading('route','routes');
+  api('/stations/summary',{country:forCountry}).then(function(rows){
+    // A country switch mid-request must not paint the old country's numbers.
+    if(state.country!==forCountry)return;
     rankState.station.data=rows;
     document.getElementById('stationRankCount').textContent=rows.length+' stations';
     renderRankTable('station');
-  }).catch(function(){document.getElementById('stationRankTbl').innerHTML='<tbody><tr><td class="error-msg">Unavailable.</td></tr></tbody>';});
-  api('/routes/summary',{country:state.country}).then(function(rows){
+  }).catch(function(){if(state.country===forCountry)document.getElementById('stationRankTbl').innerHTML='<thead></thead><tbody><tr><td class="error-msg">Couldn’t load station rankings. <a href="#" onclick="loadRankings();return false">Try again</a></td></tr></tbody>';});
+  api('/routes/summary',{country:forCountry}).then(function(rows){
+    if(state.country!==forCountry)return;
     rankState.route.data=rows;
     document.getElementById('routeRankCount').textContent=rows.length+' routes';
     renderRankTable('route');
-  }).catch(function(){document.getElementById('routeRankTbl').innerHTML='<tbody><tr><td class="error-msg">Unavailable.</td></tr></tbody>';});
+  }).catch(function(){if(state.country===forCountry)document.getElementById('routeRankTbl').innerHTML='<thead></thead><tbody><tr><td class="error-msg">Couldn’t load route rankings. <a href="#" onclick="loadRankings();return false">Try again</a></td></tr></tbody>';});
 }
 function renderRankTable(kind){
   var cfg=rankState[kind];
@@ -680,19 +769,24 @@ function loadNameLists(){
   api('/stations',{country:state.country}).then(function(rows){state.stations[state.country]=rows;}).catch(function(){state.stations[state.country]=[];});
   api('/routes',{country:state.country}).then(function(rows){state.routes[state.country]=rows;}).catch(function(){state.routes[state.country]=[];});
 }
-function searchLists(term){
+/* `only` limits results to one kind. The Compare box needs it: it can only
+   act on routes, but this list put 6 stations first, so for most searches
+   every visible suggestion was a station and clicking one did nothing at
+   all - the "Compare doesn't work" report. A picker must never offer a
+   choice its handler silently drops. */
+function searchLists(term,only){
   term=term.trim().toLowerCase();
   if(!term)return [];
-  var st=(state.stations[state.country]||[]).filter(function(s){return (s.display_name||s.name||'').toLowerCase().indexOf(term)>-1;}).slice(0,6)
+  var st=only==='route'?[]:(state.stations[state.country]||[]).filter(function(s){return (s.display_name||s.name||'').toLowerCase().indexOf(term)>-1;}).slice(0,6)
     .map(function(s){return {type:'station',name:s.name,label:s.display_name||s.name};});
-  var rt=(state.routes[state.country]||[]).filter(function(r){return r.toLowerCase().indexOf(term)>-1;}).slice(0,6)
+  var rt=only==='station'?[]:(state.routes[state.country]||[]).filter(function(r){return r.toLowerCase().indexOf(term)>-1;}).slice(0,only==='route'?8:6)
     .map(function(r){return {type:'route',name:r,label:r};});
   return st.concat(rt);
 }
-function wireSearch(inputId,popId,onPick){
+function wireSearch(inputId,popId,onPick,only){
   var input=document.getElementById(inputId),pop=document.getElementById(popId);
   input.addEventListener('input',debounce(function(){
-    var res=searchLists(input.value);
+    var res=searchLists(input.value,only);
     if(!res.length){pop.innerHTML=input.value.trim()?'<div class="sres-empty">No matches in '+state.country+'.</div>':'';pop.classList.toggle('open',!!input.value.trim());return;}
     pop.innerHTML=res.map(function(r,i){
       return '<div class="sres" data-i="'+i+'"><span class="stag">'+(r.type==='station'?'Stn':'Rte')+'</span><span class="sname">'+esc(r.label)+'</span></div>';
@@ -705,7 +799,7 @@ function wireSearch(inputId,popId,onPick){
   input.addEventListener('blur',function(){setTimeout(function(){pop.classList.remove('open');},150);});
 }
 wireSearch('searchInput','searchPop',function(r){openDetail(r.type,r.name);});
-wireSearch('cmpInput','cmpPop',function(r){if(r.type==='route')addCompare(r.name);});
+wireSearch('cmpInput','cmpPop',function(r){addCompare(r.name);},'route');
 
 /* ---------- simple mode ----------
    The default landing view (see .simple-* CSS). One search box, one plain-
@@ -713,7 +807,7 @@ wireSearch('cmpInput','cmpPop',function(r){if(r.type==='route')addCompare(r.name
    /live/board,/station/{name}/stats,/route/{name}/stats data every other
    view already calls - this is a different presentation of the same real
    data, not a separate parallel feature to keep in sync. */
-wireSearch('simpleInput','simplePop',function(r){showSimpleResult(r);});
+wireTrainSearch('simpleInput','simplePop');
 Array.prototype.forEach.call(document.querySelectorAll('[data-view-link]'),function(a){
   a.addEventListener('click',function(e){
     e.preventDefault();
@@ -729,19 +823,68 @@ function simplePlainMessage(delay){
   return 'A long delay. This may also qualify you for money back — see below.';
 }
 function simpleResultEl(){return document.getElementById('simpleResult');}
-function showSimpleResult(r){
-  simpleResultEl().innerHTML='<div class="simple-loading">Looking…</div>';
-  if(r.type==='route'){
-    var match=(boardData&&boardData.trains||[]).filter(function(t){return t.route_name===r.name||t.train_number===r.name;})[0];
-    if(match){renderSimpleLive(r.label,match);return;}
-    api('/route/'+encodeURIComponent(r.name)+'/stats',{country:state.country}).then(function(d){
-      renderSimpleHistoric(r.label,d,'This train isn’t currently running.');
-    }).catch(renderSimpleError);
-  } else {
-    api('/station/'+encodeURIComponent(r.name)+'/stats',{country:state.country}).then(function(d){
-      renderSimpleHistoric(r.label,d,'Typical reliability at this station.');
-    }).catch(renderSimpleError);
+
+/* Search that actually finds a train.
+   The first version of this view only searched the static /stations and
+   /routes name lists, so the best it could ever answer was "how reliable is
+   this route, historically" - a reliability meter, not a tracker. Trains that
+   are running right now live in /live/board, which already supports a server-
+   side `q` over train number, route, headsign and current stop, so that is
+   searched first and its hits are offered as real trains. Stations and routes
+   stay in the list underneath as the broader fallback. */
+function wireTrainSearch(inputId,popId){
+  var input=document.getElementById(inputId),pop=document.getElementById(popId);
+  var seq=0;
+  function render(results,note){
+    if(!results.length){
+      pop.innerHTML='<div class="sres-empty">'+(note||('Nothing matching that in '+state.country+'.'))+'</div>';
+      pop.classList.add('open');return;
+    }
+    pop.innerHTML=results.map(function(r,i){
+      var tag=r.type==='train'?'Train':(r.type==='station'?'Station':'Route');
+      var meta='';
+      if(r.type==='train'){
+        var sev=sevInfo(r.train.delay_minutes);
+        meta='<span class="sres-meta '+sev.cls+'">'+delayLabel(r.train.delay_minutes)+'</span>';
+      }
+      return '<div class="sres" data-i="'+i+'"><span class="stag stag-'+r.type+'">'+tag+'</span>'+
+             '<span class="sname">'+esc(r.label)+'</span>'+
+             (r.sub?'<span class="ssub">'+esc(r.sub)+'</span>':'')+meta+'</div>';
+    }).join('');
+    pop.classList.add('open');
+    Array.prototype.forEach.call(pop.querySelectorAll('.sres'),function(el,i){
+      el.addEventListener('click',function(){
+        pop.classList.remove('open');input.value='';
+        var r=results[i];
+        if(r.type==='train')showTrain(r.train);
+        else if(r.type==='station')showStationDepartures(r.name,r.label);
+        else showRouteTrains(r.name,r.label);
+      });
+    });
   }
+  input.addEventListener('input',debounce(function(){
+    var term=input.value.trim();
+    if(!term){pop.classList.remove('open');pop.innerHTML='';return;}
+    var mine=++seq;
+    var lists=searchLists(term).map(function(r){return {type:r.type,name:r.name,label:r.label};});
+    render(lists,'Searching…');
+    api('/live/board',{country:state.country,q:term,limit:8}).then(function(d){
+      if(mine!==seq)return;  // a later keystroke already won
+      var trains=(d.trains||[]).map(function(t){
+        return {type:'train',train:t,
+          label:trainLabel(t),
+          sub:(t.headsign?('→ '+t.headsign):'')};
+      });
+      render(trains.concat(lists));
+    }).catch(function(){if(mine===seq)render(lists);});
+  },250));
+  input.addEventListener('blur',function(){setTimeout(function(){pop.classList.remove('open');},180);});
+}
+function trainLabel(t){
+  // train_number is the rider-facing one where a country has it (HU's
+  // "5827 személyvonat", AT's "REX 1822"); PL/DE's feeds carry no number at
+  // all, so the route code is the only handle those riders have.
+  return t.train_number||t.route_name||'Train';
 }
 function renderSimpleError(){simpleResultEl().innerHTML='<div class="simple-error">Couldn’t load that right now. Please try again.</div>';}
 function simpleActionsHtml(){
@@ -756,7 +899,173 @@ function loadSimpleActions(country,kind){
     }).join('');
   }).catch(function(){});
 }
-function renderSimpleLive(label,t){
+/* ---------- the tracker: one train, its whole journey ---------- */
+var trackMap=null,trackLayer=null;
+function showTrain(t){
+  var id=t.train_id;
+  if(!id){renderSimpleLive(trainLabel(t),t);return;}   // no id: fall back to the snapshot
+  simpleResultEl().innerHTML='<div class="simple-loading"><span class="spinner"></span>Finding '+esc(trainLabel(t))+'…</div>';
+  var forCountry=state.country;
+  api('/train/'+forCountry+'/'+encodeURIComponent(id)).then(function(d){
+    if(state.country!==forCountry)return;
+    if(!d.found){
+      // Falling back to the board snapshot is better than an error: the train
+      // is on screen, we just couldn't get its timetable.
+      renderSimpleLive(trainLabel(t),t,d.error);return;
+    }
+    renderTrain(d);
+  }).catch(function(){renderSimpleLive(trainLabel(t),t);});
+}
+function renderTrain(d){
+  var sev=sevInfo(d.delay_minutes);
+  var title=d.train_number||d.route_name||'Train';
+  var sub=[];
+  if(d.route_name&&d.route_name!==title)sub.push(d.route_name);
+  // origin===destination happens when the feed only published one remaining
+  // stop (DE), where "Nordheim → Nordheim" reads like a bug rather than a
+  // train about to terminate. Fall back to where it's headed.
+  if(d.origin&&d.destination&&d.origin!==d.destination)sub.push(d.origin+' → '+d.destination);
+  else if(d.headsign)sub.push('→ '+d.headsign);
+  else if(d.destination)sub.push('→ '+d.destination);
+
+  // Draw the map whenever the journey has mappable stops - the train's own
+  // marker is optional. PL/DE resolve no vehicle position for many trains,
+  // and showing the line it runs is still far better than no map at all.
+  var mappable=(d.stops||[]).filter(function(s){return s.lat!=null&&s.lon!=null;});
+
+  var html='<div class="track">'+
+    '<div class="track-head '+sev.cls+'">'+
+      '<div class="track-id">'+esc(title)+'</div>'+
+      '<div class="track-sub">'+esc(sub.join(' · '))+'</div>'+
+      '<div class="track-status">'+sevIconSvg(sev.cls)+'<span>'+esc(sev.word)+'</span>'+
+        '<span class="track-delay">'+delayLabel(d.delay_minutes)+'</span></div>'+
+      (d.current_stop?'<div class="track-now">Now at <b>'+esc(d.current_stop)+'</b></div>':'')+
+      '<div class="track-plain">'+simplePlainMessage(d.delay_minutes)+'</div>'+
+    '</div>'+
+    (mappable.length?'<div class="track-map" id="trackMap"></div>':'')+
+    renderJourney(d)+
+    renderRouteStats(d)+
+    simpleActionsHtml()+
+  '</div>';
+  simpleResultEl().innerHTML=html;
+  if(mappable.length)drawTrainMap(d,mappable);
+  loadSimpleActions(state.country,'affiliate_booking');
+  if(d.delay_minutes!=null&&d.delay_minutes>0)checkSimpleCompensation(d.delay_minutes);
+}
+function renderJourney(d){
+  var stops=d.stops||[];
+  if(!stops.length)return '<div class="track-empty">No stop-by-stop timetable is published for this train.</div>';
+  var scopeNote=d.journey_scope==='remaining'
+    ? '<div class="track-scope">Germany’s live feed publishes only a train’s <b>remaining</b> stops, so earlier ones aren’t listed.</div>'
+    : '';
+  var rows=stops.map(function(s){
+    var ssev=sevInfo(s.delay_min);
+    var cls='jstop'+(s.passed?' passed':'')+(s.current?' current':'');
+    var times='<span class="jsched'+(s.delay_min>2?' struck':'')+'">'+esc(s.scheduled||'—')+'</span>';
+    if(s.delay_min!=null&&s.delay_min>2&&s.expected)times+='<span class="jexp '+ssev.cls+'">'+esc(s.expected)+'</span>';
+    return '<li class="'+cls+'">'+
+      '<span class="jdot"></span>'+
+      '<span class="jname">'+esc(s.display||s.name)+(s.platform?'<span class="jplat">pl. '+esc(s.platform)+'</span>':'')+'</span>'+
+      '<span class="jtimes">'+times+'</span>'+
+      '<span class="jdelay '+ssev.cls+'">'+(s.delay_min==null?'':(s.delay_min>2?'+'+Math.round(s.delay_min):'on time'))+'</span>'+
+    '</li>';
+  }).join('');
+  return '<div class="track-journey"><h3>Every stop'+(d.journey_scope==='remaining'?' still to come':'')+'</h3>'+
+    scopeNote+'<ol class="journey">'+rows+'</ol></div>';
+}
+function renderRouteStats(d){
+  var rs=d.route_stats;
+  if(!rs||!rs.total)return '';
+  // The point of pairing a tracker with this project's archive: today's delay
+  // next to how this route usually behaves.
+  return '<div class="track-stats"><h3>How this route usually runs</h3>'+
+    '<div class="track-stat-row">'+
+      '<div class="track-stat"><b>'+fmtNum(rs.pct_on_time,0)+'%</b><span>on time</span></div>'+
+      '<div class="track-stat"><b>'+fmtNum(rs.avg_delay,1)+' min</b><span>average delay</span></div>'+
+      '<div class="track-stat"><b>'+Math.round(rs.worst_delay||0)+' min</b><span>worst recorded</span></div>'+
+    '</div>'+
+    '<div class="track-stat-note">Based on '+Number(rs.total).toLocaleString()+' observations we’ve recorded on '+esc(d.route_name||'this route')+'. '+
+    '<a href="#" onclick="openDetail(\'route\',\''+esc(String(d.route_name||'').replace(/'/g,"\\'"))+'\');return false;">Full history →</a></div>'+
+  '</div>';
+}
+function drawTrainMap(d,mappable){
+  var el=document.getElementById('trackMap');
+  if(!el||typeof L==='undefined')return;
+  if(trackMap){trackMap.remove();trackMap=null;}
+  trackMap=L.map(el,{zoomControl:false,attributionControl:false,scrollWheelZoom:false});
+  L.tileLayer(basemapUrl(),{maxZoom:18}).addTo(trackMap);
+  var pts=mappable.map(function(s){return [s.lat,s.lon];});
+  var color=cssVar(sevColorVar(sevInfo(d.delay_minutes).cls))||'#1d4e89';
+  if(pts.length>1)L.polyline(pts,{color:color,weight:3,opacity:0.5}).addTo(trackMap);
+  mappable.forEach(function(s){
+    L.circleMarker([s.lat,s.lon],{radius:s.current?5:3,color:color,weight:1,
+      fillColor:s.current?color:cssVar('--surface'),fillOpacity:1}).addTo(trackMap)
+      .bindTooltip(s.display||s.name);
+  });
+  if(d.lat!=null&&d.lon!=null){
+    L.circleMarker([d.lat,d.lon],{radius:9,color:'#fff',weight:3,fillColor:color,fillOpacity:1})
+      .addTo(trackMap).bindTooltip(trainLabelFromJourney(d));
+  }
+  if(pts.length>1)trackMap.fitBounds(L.latLngBounds(pts).pad(0.15));
+  else trackMap.setView(pts[0],11);
+  setTimeout(function(){if(trackMap)trackMap.invalidateSize();},60);
+}
+function trainLabelFromJourney(d){return d.train_number||d.route_name||'Train';}
+
+/* ---------- station: what's actually leaving ---------- */
+function showStationDepartures(name,label){
+  simpleResultEl().innerHTML='<div class="simple-loading"><span class="spinner"></span>Looking up '+esc(label)+'…</div>';
+  var forCountry=state.country;
+  api('/live/board',{country:forCountry,q:name,limit:40}).then(function(d){
+    if(state.country!==forCountry)return;
+    var trains=(d.trains||[]).filter(function(t){
+      return (t.current_stop===name)||(t.current_stop_display===label)||
+             (t.stops||[]).some(function(s){return s.name===name;});
+    });
+    renderTrainList(label,trains,'trains at or heading through this station right now',
+      function(){showStationHistory(name,label);});
+  }).catch(renderSimpleError);
+}
+function showRouteTrains(name,label){
+  simpleResultEl().innerHTML='<div class="simple-loading"><span class="spinner"></span>Looking up '+esc(label)+'…</div>';
+  var forCountry=state.country;
+  api('/live/board',{country:forCountry,q:name,limit:40}).then(function(d){
+    if(state.country!==forCountry)return;
+    var trains=(d.trains||[]).filter(function(t){return t.route_name===name;});
+    renderTrainList(label,trains,'trains running on this route right now',
+      function(){showRouteHistory(name,label);});
+  }).catch(renderSimpleError);
+}
+function renderTrainList(label,trains,what,fallback){
+  if(!trains.length){fallback();return;}
+  var rows=trains.slice(0,15).map(function(t,i){
+    var sev=sevInfo(t.delay_minutes);
+    return '<li class="dep-row" data-i="'+i+'">'+
+      '<span class="dep-id">'+esc(trainLabel(t))+'</span>'+
+      '<span class="dep-to">'+esc(t.headsign?('→ '+t.headsign):(t.current_stop_display||t.current_stop||''))+'</span>'+
+      '<span class="dep-delay '+sev.cls+'">'+esc(sev.word)+' · '+delayLabel(t.delay_minutes)+'</span>'+
+    '</li>';
+  }).join('');
+  simpleResultEl().innerHTML='<div class="track"><div class="track-head">'+
+    '<div class="track-id">'+esc(label)+'</div>'+
+    '<div class="track-sub">'+trains.length+' '+what+'. Pick one to track it.</div>'+
+    '</div><ol class="deps">'+rows+'</ol></div>';
+  Array.prototype.forEach.call(simpleResultEl().querySelectorAll('.dep-row'),function(el,i){
+    el.addEventListener('click',function(){showTrain(trains[i]);});
+  });
+}
+function showStationHistory(name,label){
+  api('/station/'+encodeURIComponent(name)+'/stats',{country:state.country}).then(function(d){
+    renderSimpleHistoric(label,d,'Nothing running here right now — here’s how it usually runs.');
+  }).catch(renderSimpleError);
+}
+function showRouteHistory(name,label){
+  api('/route/'+encodeURIComponent(name)+'/stats',{country:state.country}).then(function(d){
+    renderSimpleHistoric(label,d,'This train isn’t running right now — here’s how it usually runs.');
+  }).catch(renderSimpleError);
+}
+
+function renderSimpleLive(label,t,note){
   var sev=sevInfo(t.delay_minutes);
   var html='<div class="simple-card '+sev.cls+'">'+
     sevIconSvg(sev.cls)+
@@ -764,6 +1073,10 @@ function renderSimpleLive(label,t){
     '<div class="simple-sub">'+esc(label)+(t.headsign?(' → '+esc(t.headsign)):'')+' · now at '+esc(t.current_stop_display||t.current_stop||'—')+'</div>'+
     '<div class="simple-delay">'+delayLabel(t.delay_minutes)+'</div>'+
     '<div class="simple-plain">'+simplePlainMessage(t.delay_minutes)+'</div>'+
+    // Only reached when the stop-by-stop lookup failed but we still have the
+    // train from the live board - say why the timetable is missing rather
+    // than silently showing less.
+    (note?'<div class="track-scope">'+esc(note)+'</div>':'')+
     '</div>'+simpleActionsHtml();
   simpleResultEl().innerHTML=html;
   loadSimpleActions(state.country,'affiliate_booking');
