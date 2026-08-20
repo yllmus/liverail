@@ -33,3 +33,12 @@
 !tests/test_de_poller.py
 !station_names.py
 !tests/test_station_names.py
+!hu_route_names.py
+!tests/test_hu_route_names.py
+!config.py
+!.env.example
+!schema/
+!schema/monetization_readiness.sql
+!schema/compensation_rules_seed.sql
+!schema/partner_links_seed.sql
+!robots.txt
