@@ -121,6 +121,10 @@ def test_resolve_delays_translates_child_stop_id_via_parent_map():
         "lon": None,
         "position_source": None,
         "trip_id": 99,
+        # carried through unresolved so /train/DE/{id} can find this trip
+        # again in a freshly-fetched feed - our integer trip_id can't
+        # address the feed itself.
+        "gtfs_trip_id": "T1",
     }
     # the query must have been issued against the *parent* id, not the raw one
     assert "437028" in cur.last_query_args

@@ -15,6 +15,8 @@ DB_CONFIG = {
 }
 
 COUNTRY_CODE = "PL"
+# See resolve_delays() for why this guard exists.
+MAX_PLAUSIBLE_DELAY_MIN = 720
 
 GTFS_RT_URL = "https://mkuran.pl/gtfs/polish_trains/updates.pb"
 
@@ -126,6 +128,21 @@ def resolve_delays(cur, rows, now_epoch=None):
         if scheduled_epoch is None:
             continue
 
+        # A "delay" beyond 12 hours is a schedule-version mismatch, not a late
+        # train. This feed's stop_sequence numbering usually matches our
+        # imported static snapshot (measured: 399/400 sampled trips have every
+        # feed sequence inside the static trip's own range), but a few trips -
+        # international ones especially - get renumbered upstream, so the
+        # sequence-to-sequence match above pairs the wrong stops and produces
+        # ~20-hour figures. One real example, PLK_LEO_2026_516260411, is
+        # numbered 15-31 in the feed and 0-16 in stop_times. These were being
+        # written to history as real observations (they are why PL's worst_delay
+        # reads 1182 minutes); skipped now, same graceful-skip convention as
+        # every other row this function can't resolve.
+        delay_minutes = round((row["actual_epoch"] - scheduled_epoch) / 60, 2)
+        if abs(delay_minutes) > MAX_PLAUSIBLE_DELAY_MIN:
+            continue
+
         lat = lon = None
         position_source = None
         cur.execute("""
@@ -152,11 +169,17 @@ def resolve_delays(cur, rows, now_epoch=None):
             "station_name": station_name,
             "route_name": route_name,
             "headsign": headsign,
-            "delay_minutes": round((row["actual_epoch"] - scheduled_epoch) / 60, 2),
+            "delay_minutes": delay_minutes,
             "lat": lat,
             "lon": lon,
             "position_source": position_source,
             "trip_id": trip_id,
+            # The feed's own trip id, carried through unresolved alongside our
+            # integer trips.id. api.py's /train/{country}/{id} needs it to find
+            # this exact trip again in a freshly-fetched feed (the only place
+            # the rest of the journey's stop_time_updates live) - our own
+            # trip_id can't address the feed.
+            "gtfs_trip_id": row["gtfs_trip_id"],
         })
     # mkuran.pl's live feed can legitimately carry two simultaneously-active
     # entities for the same recurring gtfs_trip_id at once (e.g. an overnight

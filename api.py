@@ -9,9 +9,15 @@ import requests as req
 import threading
 import time
 from datetime import datetime, timedelta
-from austria_poller import call_radar, parse_at_vehicles
-from poland_poller import fetch_feed, parse_pl_vehicles, resolve_delays
-from germany_poller import fetch_feed as fetch_de_feed, parse_de_vehicles, resolve_delays as resolve_de_delays
+from zoneinfo import ZoneInfo
+from austria_poller import call_radar, call_trip, parse_at_vehicles
+from poland_poller import fetch_feed, parse_pl_vehicles, resolve_delays, _scheduled_epoch
+from germany_poller import (
+    fetch_feed as fetch_de_feed,
+    parse_de_vehicles,
+    resolve_delays as resolve_de_delays,
+    load_parent_map,
+)
 from station_names import clean_display_name
 from hu_route_names import clean_route_name
 from config import DB_PASSWORD
@@ -55,7 +61,19 @@ _SUMMARY_CACHE = {}  # (kind, country) -> {"data": ..., "expires": epoch}
 _SUMMARY_TTL = 900  # 15min - all-time reliability barely shifts minute to minute
 _SUMMARY_LOCKS = {}
 
-def _cached_summary(kind, country, compute_fn):
+# The three Rankings/Compare queries are the expensive ones (measured through
+# nginx: PL 27.8s/34.1s, DE 25.4s/23.3s, AT 12.1s/9.2s cold), and a 15min TTL
+# meant any visitor arriving after a quiet quarter-hour paid that in full - the
+# Rankings tab just sat empty while they waited, which is what "Rankings is
+# blank" actually was. These are all-time historical aggregates over millions
+# of rows; they do not meaningfully change within a day, so they get a long
+# TTL and a background thread that refreshes them before it expires. Result: a
+# request should never compute one of these itself.
+_WARM_TTL = 21600      # 6h
+_WARM_INTERVAL = 18000  # 5h - comfortably inside _WARM_TTL, so no gap opens
+_WARM_KINDS = ("routes", "stations", "routes_list")
+
+def _cached_summary(kind, country, compute_fn, ttl=None):
     cache_key = (kind, country)
     cached = _SUMMARY_CACHE.get(cache_key)
     if cached is not None and time.time() < cached["expires"]:
@@ -66,8 +84,33 @@ def _cached_summary(kind, country, compute_fn):
         if cached is not None and time.time() < cached["expires"]:
             return cached["data"]
         data = compute_fn()
-        _SUMMARY_CACHE[cache_key] = {"data": data, "expires": time.time() + _SUMMARY_TTL}
+        expires = time.time() + (ttl if ttl is not None else _SUMMARY_TTL)
+        _SUMMARY_CACHE[cache_key] = {"data": data, "expires": expires}
         return data
+
+def _warm_summaries():
+    """Precompute the Rankings/Compare aggregates for every country.
+
+    Runs in a daemon thread so it never blocks startup or a request. Countries
+    are done one at a time on purpose - this box has a single vCPU shared with
+    four pollers, and firing 12 full-table aggregates at once would starve
+    exactly the requests this is meant to speed up."""
+    while True:
+        for country in ("HU", "AT", "PL", "DE"):
+            for kind, compute in (
+                ("routes", lambda c=country: _routes_summary_query(c)),
+                ("stations", lambda c=country: _stations_summary_query(c)),
+                ("routes_list", lambda c=country: _routes_query(c)),
+            ):
+                try:
+                    _cached_summary(kind, country, compute, ttl=_WARM_TTL)
+                except Exception as exc:
+                    print(f"summary warm {kind}/{country} failed: {exc}")
+        time.sleep(_WARM_INTERVAL)
+
+@app.on_event("startup")
+def _start_warmer():
+    threading.Thread(target=_warm_summaries, daemon=True).start()
 
 @app.get("/countries")
 def get_countries():
@@ -133,7 +176,7 @@ def _routes_query(country):
 
 @app.get("/routes")
 def get_routes(country: str = "HU"):
-    return _cached_summary("routes_list", country, lambda: _routes_query(country))
+    return _cached_summary("routes_list", country, lambda: _routes_query(country), ttl=_WARM_TTL)
 
 def _routes_summary_query(country):
     conn = get_conn()
@@ -157,7 +200,7 @@ def _routes_summary_query(country):
 
 @app.get("/routes/summary")
 def get_routes_summary(country: str = "HU"):
-    return _cached_summary("routes", country, lambda: _routes_summary_query(country))
+    return _cached_summary("routes", country, lambda: _routes_summary_query(country), ttl=_WARM_TTL)
 
 @app.get("/route/{route_name:path}/delays")
 def get_route_delays(route_name: str, country: str = "HU"):
@@ -306,7 +349,7 @@ def _stations_summary_query(country):
 
 @app.get("/stations/summary")
 def get_stations_summary(country: str = "HU"):
-    return _cached_summary("stations", country, lambda: _stations_summary_query(country))
+    return _cached_summary("stations", country, lambda: _stations_summary_query(country), ttl=_WARM_TTL)
 
 @app.get("/trend")
 def get_trend(route: str = None, station: str = None, days: int = 30, country: str = "HU"):
@@ -349,10 +392,11 @@ GRAPHQL_QUERY = """
     lat
     lon
     trip {
+      gtfsId
       tripShortName
       tripHeadsign
       route { longName }
-      stoptimes { stop { name } scheduledDeparture departureDelay }
+      stoptimes { stop { name lat lon } scheduledDeparture departureDelay }
     }
     stopRelationship { stop { name lat lon } status }
     prevOrCurrentStop { arrivalDelay departureDelay }
@@ -392,6 +436,13 @@ def _live_result(rows, stop_key):
             "route_name": row["route_name"],
             "train_number": row.get("train_number") or "",
             "headsign": row.get("headsign"),
+            # Whatever identifier this country's feed uses to address one
+            # specific train, passed through opaquely so /train/{country}/{id}
+            # can look the same train up again. Deliberately NOT normalized
+            # into a shared scheme - AT's is a HAFAS composite key, PL/DE's is
+            # a GTFS trip id, and pretending they're interchangeable is the
+            # exact mistake documented in NOTES.md's per-train identity note.
+            "train_id": row.get("live_trip_id") or row.get("gtfs_trip_id"),
             "current_stop": row[stop_key],
             "delay_minutes": row["delay_minutes"],
             "status": "IN_TRANSIT_TO",
@@ -436,7 +487,12 @@ def _live_de():
     return _live_result(rows, "station_name")
 
 _LIVE_PROVIDERS = {
-    "AT": (_live_at, 25),
+    # AT's radar() call used to be cheap (~1-2s), which is why 25s was fine.
+    # Raising radar.js's results cap 256 -> 2000 (it was silently truncating
+    # ~90% of the national feed) made the payload ~9x bigger and the cold
+    # call ~13-16s, so a 25s TTL against the frontend's 30s auto-refresh
+    # meant every single refresh tick paid the full cost. 60s, matching DE.
+    "AT": (_live_at, 60),
     # PL/DE's fetch_fn is a fresh GTFS-RT pull + a per-row schedule join
     # (~30s for PL's ~22k trip updates, confirmed) - not cheap like AT's
     # radar() call. A 25s TTL (matched almost exactly to the frontend's old
@@ -625,12 +681,17 @@ def get_live_hu():
         stops = []
         stop_idx = None
         for i, st in enumerate(raw_stops):
-            name = (st.get("stop") or {}).get("name") or ""
+            stop_info = st.get("stop") or {}
+            name = stop_info.get("name") or ""
             dep_delay = st.get("departureDelay") or 0
             stops.append({
                 "name": name,
                 "dep": _fmt_time(st.get("scheduledDeparture")),
                 "delay_min": round(dep_delay / 60, 1),
+                # Carried so /train/HU/{id} can draw the journey on a map,
+                # the same way AT's stopovers and PL/DE's stations do.
+                "lat": stop_info.get("lat"),
+                "lon": stop_info.get("lon"),
             })
             if name == stop_name and stop_idx is None:
                 stop_idx = i
@@ -642,6 +703,12 @@ def get_live_hu():
             "route_name": route_name,
             "train_number": trip.get("tripShortName") or "",
             "headsign": trip.get("tripHeadsign"),
+            # See _live_result()'s train_id comment. HU's is OTP's own
+            # trip.gtfsId - opaque and unjoinable to our static trips table
+            # (that's why live_trip_id exists at all), but it does reliably
+            # address one train within the live feed, which is all
+            # /train/HU/{id} needs.
+            "train_id": trip.get("gtfsId"),
             "current_stop": stop_name,
             "delay_minutes": round(delay_sec / 60, 1),
             "status": stop_rel.get("status") or "IN_TRANSIT_TO",
@@ -658,6 +725,393 @@ def get_live_hu():
         })
 
     return result
+
+# --- One train's full journey -----------------------------------------
+# /train/{country}/{id} is what turns this from a delay-statistics site into
+# an actual train tracker: given one train, where is it now and what is its
+# whole remaining timetable, stop by stop, scheduled vs. expected.
+#
+# Every country can answer this, but no two answer it the same way, and the
+# differences are real rather than cosmetic (checked against each live feed
+# directly before any of this was written):
+#   HU  - the OTP GraphQL response already carries the full stoptimes array,
+#         so get_live_hu() has been building it all along; this just finds
+#         the right train in that snapshot. No extra network call.
+#   AT  - radar() returns only ~4 upcoming stopovers, so the full journey
+#         needs a second HAFAS call, client.trip(), one train at a time
+#         (hafas/trip.js). Real GPS position and platform numbers included.
+#   PL  - the GTFS-RT feed carries every stop_time_update for the trip (mean
+#         17, max 77), but with no stop_id, no name, and no delay - only
+#         stop_sequence + an absolute timestamp. Names and scheduled times
+#         come from our own stop_times/stations tables, which is exactly
+#         what poland_poller's resolve_delays() already does for the current
+#         stop; this does it for all of them.
+#   DE   - the feed carries stop_id, delay AND time per stop, so the journey
+#         needs no schedule join at all - but its stop_ids are always
+#         platform-level children, so they go through the same
+#         load_parent_map() translation germany_poller already depends on.
+#
+# The per-country fetch is cheap enough to do on demand (measured: PL 0.5s,
+# DE 0.8s for a full raw feed fetch+parse - the expensive part of /live was
+# never the feed, it was the ~22k-row DB join, which this does for one trip
+# only). So there is no new cache here.
+_JOURNEY_ROUTE_STATS_TTL = 900
+
+# A delay this large is not a delay, it's a schedule-version mismatch. PL's
+# live feed and our imported static snapshot mostly agree on stop_sequence
+# numbering (measured: 399/400 sampled trips have every feed sequence inside
+# the static trip's own range), but a handful of trips - international ones
+# especially - are renumbered upstream, so matching sequence-to-sequence pairs
+# the wrong stops and yields ~20-hour "delays". One real example:
+# PLK_LEO_2026_516260411, numbered 15-31 in the feed and 0-16 in stop_times.
+# Rather than show a rider "1191 minutes late", these are reported as unknown -
+# the same graceful-skip-rather-than-guess convention the pollers use for rows
+# they can't resolve.
+_MAX_PLAUSIBLE_DELAY_MIN = 720
+
+def _plausible_delay(delay_min):
+    if delay_min is None or abs(delay_min) > _MAX_PLAUSIBLE_DELAY_MIN:
+        return None
+    return delay_min
+
+def _journey_stop(name, mapping, country, scheduled=None, expected=None,
+                  delay_min=None, lat=None, lon=None, platform=None):
+    return {
+        "name": name,
+        "display": _display_stop(mapping, name, country),
+        "scheduled": scheduled,
+        "expected": expected,
+        "delay_min": delay_min,
+        "lat": lat,
+        "lon": lon,
+        "platform": platform,
+    }
+
+def _epoch_to_hhmm(epoch, tz):
+    if not epoch:
+        return None
+    return datetime.fromtimestamp(epoch, tz).strftime("%H:%M")
+
+def _iso_to_hhmm(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).strftime("%H:%M")
+    except ValueError:
+        return None
+
+def _journey_hu(train_id, mapping):
+    for t in get_live_hu():
+        if t.get("train_id") != train_id:
+            continue
+        stops = [
+            _journey_stop(s["name"], mapping, "HU", scheduled=s.get("dep"),
+                          delay_min=s.get("delay_min"),
+                          lat=s.get("lat"), lon=s.get("lon"))
+            for s in t.get("stops") or []
+        ]
+        # HU's feed gives a scheduled departure and a per-stop delay but no
+        # expected time, so derive it rather than leaving the column blank.
+        for s in stops:
+            s["expected"] = _shift_hhmm(s["scheduled"], s["delay_min"])
+        return {**t, "stops": stops}
+    return None
+
+def _shift_hhmm(hhmm, delay_min):
+    if not hhmm or delay_min is None:
+        return hhmm
+    try:
+        h, m = (int(x) for x in hhmm.split(":"))
+    except ValueError:
+        return hhmm
+    total = (h * 60 + m + int(round(delay_min))) % (24 * 60)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+def _journey_at(train_id, mapping):
+    live = None
+    for t in get_live("AT"):
+        if t.get("train_id") == train_id:
+            live = t
+            break
+    trip = call_trip(train_id, live.get("route_name") if live else None)
+    if trip is None:
+        return None
+    stops = []
+    for s in trip.get("stopovers") or []:
+        # Prefer arrival for an intermediate stop, departure for the origin
+        # (which has no arrival at all) - matching what a rider reads off a
+        # platform display.
+        delay_sec = s.get("arrivalDelay")
+        if delay_sec is None:
+            delay_sec = s.get("departureDelay")
+        planned = s.get("plannedArrival") or s.get("plannedDeparture")
+        actual = s.get("arrival") or s.get("departure")
+        stops.append(_journey_stop(
+            s.get("name"), mapping, "AT",
+            scheduled=_iso_to_hhmm(planned),
+            expected=_iso_to_hhmm(actual) or _iso_to_hhmm(planned),
+            delay_min=round(delay_sec / 60, 1) if delay_sec is not None else None,
+            lat=s.get("latitude"), lon=s.get("longitude"),
+            platform=s.get("platform"),
+        ))
+    loc = trip.get("currentLocation") or {}
+    return {
+        "route_name": trip.get("line") or (live or {}).get("route_name"),
+        "train_number": trip.get("line") or "",
+        "headsign": trip.get("direction") or trip.get("destination"),
+        "train_id": train_id,
+        "current_stop": (live or {}).get("current_stop"),
+        "delay_minutes": (live or {}).get("delay_minutes"),
+        "status": "CANCELLED" if trip.get("cancelled") else "IN_TRANSIT_TO",
+        "stops": stops,
+        "lat": loc.get("latitude") or (live or {}).get("lat"),
+        "lon": loc.get("longitude") or (live or {}).get("lon"),
+        "position_source": "live",
+    }
+
+def _journey_pl(train_id, mapping):
+    feed = fetch_feed()
+    update = None
+    for entity in feed.entity:
+        if entity.HasField("trip_update") and entity.trip_update.trip.trip_id == train_id:
+            update = entity.trip_update
+            break
+    if update is None:
+        return None
+    start_date = update.trip.start_date
+    tz = ZoneInfo("Europe/Warsaw")
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # One query for the trip's whole schedule, rather than PL's
+        # per-stop-sequence lookup - this is a single trip, so the whole
+        # thing is ~17 rows.
+        cur.execute("""
+            SELECT st.stop_sequence, s.name, st.scheduled_arrival,
+                   st.scheduled_departure, s.lat, s.lon
+            FROM stop_times st
+            JOIN stations s ON s.id = st.station_id
+            WHERE st.trip_id = (
+                SELECT id FROM trips WHERE gtfs_trip_id = %s AND country_code = 'PL'
+            )
+            ORDER BY st.stop_sequence
+        """, (train_id,))
+        schedule = {row[0]: row for row in cur.fetchall()}
+        cur.execute("""
+            SELECT r.name, t.headsign
+            FROM trips t LEFT JOIN routes r ON r.id = t.route_id
+            WHERE t.gtfs_trip_id = %s AND t.country_code = 'PL'
+        """, (train_id,))
+        meta = cur.fetchone() or (None, None)
+    finally:
+        cur.close()
+        conn.close()
+
+    actual_by_seq = {}
+    for stu in update.stop_time_update:
+        epoch = None
+        if stu.HasField("arrival") and stu.arrival.HasField("time"):
+            epoch = stu.arrival.time
+        elif stu.HasField("departure") and stu.departure.HasField("time"):
+            epoch = stu.departure.time
+        if epoch:
+            actual_by_seq[stu.stop_sequence] = epoch
+
+    stops = []
+    for seq in sorted(schedule):
+        _, name, sched_arr, sched_dep, lat, lon = schedule[seq]
+        sched_str = sched_dep or sched_arr
+        sched_epoch = _scheduled_epoch(start_date, sched_str) if sched_str else None
+        actual_epoch = actual_by_seq.get(seq)
+        delay = None
+        if sched_epoch and actual_epoch:
+            delay = _plausible_delay(round((actual_epoch - sched_epoch) / 60, 1))
+        stops.append(_journey_stop(
+            name, mapping, "PL",
+            scheduled=_epoch_to_hhmm(sched_epoch, tz),
+            # If the delay was rejected as implausible the "expected" time it
+            # implies is equally wrong, so fall back to the scheduled time
+            # rather than showing a confidently wrong arrival.
+            expected=(_epoch_to_hhmm(actual_epoch, tz) if delay is not None
+                      else _epoch_to_hhmm(sched_epoch, tz)),
+            delay_min=delay, lat=lat, lon=lon,
+        ))
+    return {
+        "route_name": meta[0], "train_number": "", "headsign": meta[1],
+        "train_id": train_id, "stops": stops, "position_source": "estimated",
+        # Full route: the stop list comes from our own stop_times, so it spans
+        # origin to destination even where the feed only predicts part of it.
+        "journey_scope": "full",
+    }
+
+def _journey_de(train_id, mapping):
+    feed = fetch_de_feed()
+    update = None
+    for entity in feed.entity:
+        if entity.HasField("trip_update") and entity.trip_update.trip.trip_id == train_id:
+            update = entity.trip_update
+            break
+    if update is None:
+        return None
+    parent_map = load_parent_map()
+    tz = ZoneInfo("Europe/Berlin")
+    stop_ids = [
+        parent_map.get(stu.stop_id, stu.stop_id)
+        for stu in update.stop_time_update if stu.stop_id
+    ]
+    names = {}
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        if stop_ids:
+            cur.execute("""
+                SELECT gtfs_stop_id, name, lat, lon FROM stations
+                WHERE country_code = 'DE' AND gtfs_stop_id = ANY(%s)
+            """, (stop_ids,))
+            names = {row[0]: row[1:] for row in cur.fetchall()}
+        cur.execute("""
+            SELECT r.name, t.headsign
+            FROM trips t LEFT JOIN routes r ON r.id = t.route_id
+            WHERE t.gtfs_trip_id = %s AND t.country_code = 'DE'
+        """, (train_id,))
+        meta = cur.fetchone() or (None, None)
+    finally:
+        cur.close()
+        conn.close()
+
+    stops = []
+    for stu in update.stop_time_update:
+        parent = parent_map.get(stu.stop_id, stu.stop_id)
+        row = names.get(parent)
+        if not row:
+            # Same graceful-skip convention as the pollers: a stop we can't
+            # name is left out rather than shown as a blank row.
+            continue
+        name, lat, lon = row
+        delay_sec = None
+        actual = None
+        if stu.HasField("arrival"):
+            delay_sec = stu.arrival.delay if stu.arrival.HasField("delay") else None
+            actual = stu.arrival.time if stu.arrival.HasField("time") else None
+        if actual is None and stu.HasField("departure"):
+            delay_sec = stu.departure.delay if stu.departure.HasField("delay") else delay_sec
+            actual = stu.departure.time if stu.departure.HasField("time") else None
+        # gtfs.de gives actual time and delay, so the scheduled time is the
+        # difference - no stop_times import needed for DE (it has none).
+        sched_epoch = (actual - delay_sec) if (actual and delay_sec is not None) else actual
+        stops.append(_journey_stop(
+            name, mapping, "DE",
+            scheduled=_epoch_to_hhmm(sched_epoch, tz),
+            expected=_epoch_to_hhmm(actual, tz),
+            delay_min=round(delay_sec / 60, 1) if delay_sec is not None else None,
+            lat=lat, lon=lon,
+        ))
+    return {
+        "route_name": meta[0], "train_number": "", "headsign": meta[1],
+        "train_id": train_id, "stops": stops, "position_source": "estimated",
+        # DE is the one country with no stop_times imported, so the journey can
+        # only be as complete as the feed itself - and gtfs.de's TripUpdates
+        # carry only a trip's *remaining* stops (confirmed: a train near the end
+        # of its run reports 2, one just starting reports up to 70). Flagged so
+        # the UI can say "remaining stops" instead of implying a full route.
+        "journey_scope": "remaining",
+    }
+
+_JOURNEY_PROVIDERS = {
+    "HU": _journey_hu,
+    "AT": _journey_at,
+    "PL": _journey_pl,
+    "DE": _journey_de,
+}
+
+@app.get("/train/{country}/{train_id:path}")
+def get_train(country: str, train_id: str):
+    country = country.upper()
+    provider = _JOURNEY_PROVIDERS.get(country)
+    if provider is None:
+        return {"found": False, "error": f"Unknown country {country}"}
+    mapping = _display_map(country)
+    try:
+        journey = provider(train_id, mapping)
+    except Exception as exc:
+        # A train tracker that 500s when one upstream feed hiccups is worse
+        # than one that says so - the frontend renders this as a real message.
+        return {"found": False, "error": str(exc)}
+    if journey is None:
+        return {"found": False, "error": "This train is no longer in the live feed."}
+
+    stops = journey.get("stops") or []
+    # Which stop is the train at/heading for: the live current_stop if the
+    # feed named one, else the last stop whose expected time has passed.
+    idx = None
+    current = journey.get("current_stop")
+    if current:
+        for i, s in enumerate(stops):
+            if s["name"] == current:
+                idx = i
+                break
+    if idx is None and stops:
+        now_hhmm = datetime.now().strftime("%H:%M")
+        passed = [i for i, s in enumerate(stops) if s.get("expected") and s["expected"] <= now_hhmm]
+        idx = passed[-1] if passed else 0
+    for i, s in enumerate(stops):
+        s["passed"] = idx is not None and i < idx
+        s["current"] = i == idx
+
+    delay = journey.get("delay_minutes")
+    if delay is None and idx is not None and stops:
+        delay = stops[idx].get("delay_min")
+
+    route_name = journey.get("route_name")
+    return {
+        "found": True,
+        "country": country,
+        "train_id": journey.get("train_id") or train_id,
+        "train_number": journey.get("train_number") or "",
+        "route_name": route_name,
+        "headsign": journey.get("headsign"),
+        "origin": stops[0]["display"] if stops else None,
+        "destination": stops[-1]["display"] if stops else None,
+        "current_stop": _display_stop(mapping, current, country),
+        "delay_minutes": delay,
+        "status": journey.get("status") or "IN_TRANSIT_TO",
+        "stop_idx": idx,
+        "stops": stops,
+        "lat": journey.get("lat"),
+        "lon": journey.get("lon"),
+        "position_source": journey.get("position_source"),
+        "route_stats": _train_route_stats(route_name, country),
+        "attribution": COUNTRY_ATTRIBUTION.get(country),
+    }
+
+def _train_route_stats(route_name, country):
+    """This route's historical reliability, to sit under the live journey.
+
+    The whole point of pairing a tracker with this project's data: not just
+    "your train is 12 minutes late" but "and this route runs late 40% of the
+    time". Cached per route because it's the same whole-country-scan class of
+    query as /route/{name}/stats (see the Compare bugfix in NOTES.md)."""
+    if not route_name:
+        return None
+    def compute():
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur.execute("""
+                SELECT COUNT(*) AS total,
+                       ROUND(AVG(delay_minutes)::numeric, 1) AS avg_delay,
+                       ROUND(100.0 * SUM(CASE WHEN delay_minutes <= 2 THEN 1 ELSE 0 END)
+                             / NULLIF(COUNT(*), 0), 1) AS pct_on_time,
+                       MAX(delay_minutes) AS worst_delay
+                FROM delay_observations
+                WHERE route_name = %s AND country_code = %s
+            """, (route_name, country))
+            row = cur.fetchone()
+        finally:
+            cur.close()
+            conn.close()
+        return dict(row) if row and row["total"] else None
+    return _cached_summary("route_stats:" + route_name, country, compute)
 
 # --- SEO / growth surface ---------------------------------------------
 # Everything above this line is the JSON API the LiveRail SPA (index.html)

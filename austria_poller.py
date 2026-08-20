@@ -50,6 +50,22 @@ def call_radar():
         return []
     return json.loads(result.stdout)
 
+def call_trip(trip_id, line_name=None):
+    # One train's full journey, for api.py's /train/AT/{id}. Kept here next to
+    # call_radar() so both Node subprocess invocations live in one place and
+    # share the same relative-path/timeout convention. radar() alone can't
+    # serve a train tracker: its nextStopovers is bounded by the radar call's
+    # own duration window (~4 stops in practice), while trip() returns every
+    # stopover from origin to destination.
+    result = subprocess.run(
+        ["node", "hafas/trip.js", trip_id, line_name or ""],
+        capture_output=True, text=True, timeout=30
+    )
+    if result.returncode != 0:
+        print(f"trip.js error: {result.stderr.strip()}")
+        return None
+    return json.loads(result.stdout)
+
 def parse_at_vehicles(movements):
     rows = []
     for m in movements or []:

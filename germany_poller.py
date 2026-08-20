@@ -199,6 +199,10 @@ def resolve_delays(cur, rows, parent_map=None, now_epoch=None):
             "lon": lon,
             "position_source": position_source,
             "trip_id": trip_id,
+            # See the same field in poland_poller.resolve_delays(): the feed's
+            # own trip id, needed by /train/{country}/{id} to locate the rest
+            # of this trip's stop_time_updates in a fresh feed.
+            "gtfs_trip_id": row["gtfs_trip_id"],
         })
     return resolved
 
