@@ -21,6 +21,7 @@ from poller import resolve_trip_id as hu_resolve_trip_id
 from at_route_names import extract_at_train_number
 from trip_resolution import local_now
 from poland_poller import fetch_feed, parse_pl_vehicles, resolve_delays, _scheduled_epoch
+from search_text import normalize_search_text
 from germany_poller import (
     fetch_feed as fetch_de_feed,
     parse_de_vehicles,
@@ -135,11 +136,201 @@ def _warm_summaries():
                     _cached_summary(kind, country, compute, ttl=_WARM_TTL)
                 except Exception as exc:
                     print(f"summary warm {kind}/{country} failed: {exc}")
+            # Same thread, same one-country-at-a-time reason: the aggregates
+            # behind this cost 49-162s per country (measured). A failure here
+            # must not stop the other countries or the loop - search degrades
+            # to whatever the last successful refresh left behind, which is
+            # still useful.
+            #
+            # Unlike the summaries above, this cache lives in Postgres, not in
+            # this process - so it survives a restart and must NOT be rebuilt
+            # on every one. Without the freshness check, `systemctl restart
+            # trainapi` kicked off ~6 minutes of full-table aggregation on a
+            # single vCPU shared with four pollers, every time.
+            try:
+                if _search_index_stale(country):
+                    refresh_search_index(country)
+            except Exception as exc:
+                print(f"search index refresh {country} failed: {exc}")
         time.sleep(_WARM_INTERVAL)
 
 @app.on_event("startup")
 def _start_warmer():
     threading.Thread(target=_warm_summaries, daemon=True).start()
+
+# --- Searchable name index -------------------------------------------
+# Backs both /search (typo tolerance) and /sitemap.xml (thin-page exclusion)
+# from one table - see schema/006_search_index.sql for why they share it.
+
+# Minimum observations before a station or route gets its own indexable page.
+# Below this there is nothing on the page worth ranking: the SEO template
+# renders an on-time percentage and an average delay, and both are noise (or
+# blank) under a couple of dozen samples. Measured against the real data,
+# this drops 10,245 zero-observation station pages from the sitemap.
+_SEO_MIN_OBSERVATIONS = 20
+
+def _search_index_stale(country, max_age_hours=20):
+    """Has this country's index gone longer than max_age_hours without a rebuild?
+
+    Deliberately shorter than a day but far longer than the warmer's 5h loop,
+    so a normally-running box refreshes on the first loop after ~20h and a
+    restarted one reuses what is already in Postgres.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT max(refreshed_at) FROM search_index WHERE country_code = %s
+        """, (country,))
+        newest = cur.fetchone()[0]
+    finally:
+        cur.close()
+        conn.close()
+    if newest is None:
+        return True
+    return (datetime.now() - newest) > timedelta(hours=max_age_hours)
+
+def refresh_search_index(country):
+    """Rebuild one country's searchable names. Called from the warmer thread.
+
+    Written as delete-then-insert inside a single transaction rather than an
+    upsert: names genuinely disappear between GTFS imports, and an upsert
+    would leave those rows behind forever with a stale observation count. The
+    whole operation is one transaction, so a concurrent /search either sees
+    the previous contents or the new ones, never a half-empty table.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # GROUP BY name, not station id - DE has 15,731 station rows sharing
+        # 8,013 names, and four identical suggestions for "Harras" is a worse
+        # search result than one. See schema/006_search_index.sql. There is no
+        # count fan-out here the way there is for routes below: every
+        # observation has exactly one station_id, so summing across the rows
+        # that share a name is the honest total for that name.
+        cur.execute("""
+            SELECT s.name, MIN(s.display_name), COUNT(o.id)
+            FROM stations s
+            LEFT JOIN delay_observations o ON o.station_id = s.id
+            WHERE s.country_code = %s AND s.display_name IS NOT NULL
+            GROUP BY s.name
+        """, (country,))
+        stations = cur.fetchall()
+
+        # Routes are counted WITHOUT joining `routes`, deliberately. Joining
+        # to pick up long_name multiplies the count by the number of route
+        # rows sharing that name - HU has 11,132 route rows for 3,813 distinct
+        # names, and the first version of this reported route S70 with
+        # 28,840,464 observations against a whole-table total of ~15M (the
+        # real figure is 97,441). A wrong count here is not cosmetic: it
+        # feeds both the search ranking and the sitemap's thin-page
+        # threshold. Counts and labels are therefore two independent queries,
+        # merged in Python.
+        cur.execute("""
+            SELECT route_name, COUNT(*)
+            FROM delay_observations
+            WHERE country_code = %s AND route_name IS NOT NULL
+            GROUP BY route_name
+        """, (country,))
+        route_counts = cur.fetchall()
+
+        cur.execute("""
+            SELECT name, MIN(long_name)
+            FROM routes
+            WHERE country_code = %s AND name IS NOT NULL AND long_name IS NOT NULL
+            GROUP BY name
+        """, (country,))
+        long_names = dict(cur.fetchall())
+
+        rows = [(country, "station", n, d, normalize_search_text(f"{n} {d or ''}"), c)
+                for n, d, c in stations]
+        rows += [(country, "route", n, long_names.get(n),
+                  normalize_search_text(f"{n} {long_names.get(n) or ''}"), c)
+                 for n, c in route_counts]
+
+        cur.execute("DELETE FROM search_index WHERE country_code = %s", (country,))
+        psycopg2.extras.execute_values(cur, """
+            INSERT INTO search_index
+                (country_code, kind, name, display_name, search_text, observations)
+            VALUES %s
+        """, rows, page_size=1000)
+        conn.commit()
+        return len(rows)
+    finally:
+        cur.close()
+        conn.close()
+
+@app.get("/search")
+def search(q: str, country: str = "HU", limit: int = 10, kind: str = None):
+    """Typo-tolerant station and route search.
+
+    Replaces the frontend's client-side substring match, which required an
+    exact prefix - "Budpest" or "Munchen" returned nothing at all. Ranking
+    blends trigram similarity with how much data we actually hold for the
+    name, so a busy main station outranks a rural halt whose name happens to
+    score marginally higher.
+    """
+    raw = (q or "").strip()
+    if not raw:
+        return {"query": raw, "country": country, "results": []}
+    needle = normalize_search_text(raw)
+    limit = max(1, min(limit, 50))
+
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        # word_similarity(), not similarity(): plain similarity() normalises
+        # over the WHOLE target string, so a short needle against a long name
+        # scores terribly - searching AT for "Wien" scored 0.125 against
+        # "Wien Hauptbahnhof" and returned Gratwein-Gratkorn instead.
+        # word_similarity() compares the needle against the best-matching
+        # extent of the target, so "Wien" scores ~1.0 there. similarity() is
+        # kept as a GREATEST arm because it still wins for a needle that
+        # spans several words ("Warszawa Centr").
+        #
+        # The popularity term is what makes the ranking usable rather than
+        # merely correct. Measured before it existed: "Munchen" ranked
+        # "Munchhausen" (0 observations) above "München Hbf" (11,674) because
+        # it scored 0.429 vs 0.333. A rider typing a misspelt city name wants
+        # the busy station. ln() rather than the raw count so HU's S70
+        # (97,441 rows) does not simply dominate every query; capped at 1.0
+        # and weighted 0.25 so popularity can break a near-tie but never
+        # outrank a genuinely better textual match.
+        cur.execute("""
+            SELECT kind, name, display_name, observations,
+                   GREATEST(
+                       word_similarity(%(q)s, search_text),
+                       similarity(%(q)s, search_text)
+                   ) AS score,
+                   (search_text LIKE %(like)s) AS substring_hit
+            FROM search_index
+            WHERE country_code = %(country)s
+              AND (%(kind)s::text IS NULL OR kind = %(kind)s)
+              AND (
+                    search_text LIKE %(like)s
+                 OR %(q)s <%% search_text
+                 OR %(q)s %% search_text
+              )
+            ORDER BY (
+                       GREATEST(
+                           word_similarity(%(q)s, search_text),
+                           similarity(%(q)s, search_text)
+                       )
+                       + LEAST(ln(observations + 1) / 14.0, 1.0) * 0.25
+                     ) DESC,
+                     observations DESC
+            LIMIT %(limit)s
+        """, {"q": needle, "like": f"%{needle}%", "country": country,
+              "kind": kind, "limit": limit})
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+    for r in rows:
+        r["score"] = round(float(r["score"] or 0), 3)
+        r["label"] = r["display_name"] or r["name"]
+    return {"query": raw, "country": country, "results": rows}
 
 @app.get("/countries")
 def get_countries():
@@ -1814,9 +2005,15 @@ _COUNTRY_NAMES = {"HU": "Hungary", "AT": "Austria", "PL": "Poland", "DE": "Germa
 def _base_url(request: Request) -> str:
     return f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
 
-def _seo_page(request: Request, title: str, description: str, path: str, body_html: str, json_ld: dict = None) -> str:
+def _seo_page(request: Request, title: str, description: str, path: str, body_html: str, json_ld: dict = None, noindex: bool = False) -> str:
     base = _base_url(request)
     canonical = f"{base}{path}"
+    # Thin pages are excluded from /sitemap.xml, but a sitemap only controls
+    # what we *submit* - a crawler that reaches a quiet halt by following an
+    # internal link would index it anyway. This is the half of the fix that
+    # actually binds. "follow" is kept so the links out of the page still
+    # pass through to the pages that do have data.
+    robots_tag = '<meta name="robots" content="noindex,follow">' if noindex else ""
     json_ld_tag = ""
     if json_ld is not None:
         import json as _json
@@ -1832,6 +2029,7 @@ def _seo_page(request: Request, title: str, description: str, path: str, body_ht
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{_esc(title)}</title>
 <meta name="description" content="{_esc(description)}">
+{robots_tag}
 <link rel="canonical" href="{_esc(canonical)}">
 <meta property="og:type" content="website">
 <meta property="og:title" content="{_esc(title)}">
@@ -1872,7 +2070,7 @@ def seo_station_page(request: Request, country: str, name: str):
     row = cur.fetchone()
     cur.close(); conn.close()
     if not row:
-        return HTMLResponse(_seo_page(request, "Station not found", "This station isn't in our data.", request.url.path, "<h1>Station not found</h1>"), status_code=404)
+        return HTMLResponse(_seo_page(request, "Station not found", "This station isn't in our data.", request.url.path, "<h1>Station not found</h1>", noindex=True), status_code=404)
     display = row["display_name"] or name
     country_name = _COUNTRY_NAMES.get(country, country)
     title = f"{display} train delays — {country_name} | LiveRail"
@@ -1894,7 +2092,8 @@ def seo_station_page(request: Request, country: str, name: str):
         "name": display,
         "address": {"@type": "PostalAddress", "addressCountry": country},
     }
-    return _seo_page(request, title, description, request.url.path, body, json_ld)
+    return _seo_page(request, title, description, request.url.path, body, json_ld,
+                     noindex=(row["total"] or 0) < _SEO_MIN_OBSERVATIONS)
 
 @app.get("/t/{country}/route/{name:path}", response_class=HTMLResponse)
 def seo_route_page(request: Request, country: str, name: str):
@@ -1910,7 +2109,7 @@ def seo_route_page(request: Request, country: str, name: str):
     row = cur.fetchone()
     cur.close(); conn.close()
     if not row or not row["total"]:
-        return HTMLResponse(_seo_page(request, "Route not found", "This route isn't in our data.", request.url.path, "<h1>Route not found</h1>"), status_code=404)
+        return HTMLResponse(_seo_page(request, "Route not found", "This route isn't in our data.", request.url.path, "<h1>Route not found</h1>", noindex=True), status_code=404)
     country_name = _COUNTRY_NAMES.get(country, country)
     title = f"{name} delays — {country_name} | LiveRail"
     description = f"{name} ({country_name}): {row['pct_on_time']}% of trains on time, {row['avg_delay']} min average delay, based on {row['total']} tracked observations."
@@ -1927,26 +2126,41 @@ def seo_route_page(request: Request, country: str, name: str):
         "@type": "TrainTrip",
         "name": name,
     }
-    return _seo_page(request, title, description, request.url.path, body, json_ld)
+    return _seo_page(request, title, description, request.url.path, body, json_ld,
+                     noindex=row["total"] < _SEO_MIN_OBSERVATIONS)
 
 @app.get("/sitemap.xml")
 def sitemap(request: Request):
-    # Reuses the same _cached_summary()-wrapped queries /stations and
-    # /routes already use - a fresh uncached DISTINCT route_name scan
-    # across all four countries' delay_observations hit the exact
-    # whole-table-scan timeout already documented in NOTES.md's Compare/
-    # Rankings bugfix notes (PL/HU: seconds-to-timeout, not milliseconds).
+    # Now reads search_index, which carries a per-name observation count
+    # (see schema/006_search_index.sql) - so this both avoids the
+    # whole-table-scan timeout the previous version was written around AND
+    # gets the thin-page filter for free from the same rows.
+    #
+    # THIN-PAGE EXCLUSION. Every /t/ page renders an on-time percentage and
+    # an average delay computed from that station's or route's observations.
+    # Below _SEO_MIN_OBSERVATIONS there is no statistic worth reading, and at
+    # zero the page is empty apart from its own title. Measured on the real
+    # data before this filter: of 21,168 station pages the sitemap submitted,
+    # 10,245 had ZERO observations - DE alone contributed 6,467. Submitting
+    # ten thousand near-identical empty pages is the textbook doorway-page
+    # pattern search engines demote an entire domain for, which is a real
+    # risk to the one growth channel this project has.
+    #
+    # The pages themselves are NOT removed or 404'd - a rider following a
+    # link to a quiet halt still gets it, and it still says plainly that
+    # there is little data. They are simply not *submitted* for indexing.
     base = _base_url(request)
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     urls = [f"{base}/"]
     for country in _COUNTRY_NAMES:
-        cur.execute("SELECT name FROM stations WHERE country_code = %s AND display_name IS NOT NULL", (country,))
+        cur.execute("""
+            SELECT kind, name FROM search_index
+            WHERE country_code = %s AND observations >= %s
+            ORDER BY observations DESC
+        """, (country, _SEO_MIN_OBSERVATIONS))
         for r in cur.fetchall():
-            urls.append(f"{base}/t/{country}/station/{_urlquote(r['name'])}")
-        for name in _cached_summary("routes_list", country, lambda c=country: _routes_query(c)):
-            if name:
-                urls.append(f"{base}/t/{country}/route/{_urlquote(name)}")
+            urls.append(f"{base}/t/{country}/{r['kind']}/{_urlquote(r['name'])}")
     cur.close(); conn.close()
     body = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
     body += [f"<url><loc>{_esc(u)}</loc></url>" for u in urls]

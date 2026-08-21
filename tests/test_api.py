@@ -196,3 +196,82 @@ def test_train_history_clamps_the_day_range():
     assert resp.json()["days"] == api._HISTORY_MAX_DAYS
     resp = client.get("/train/DE/nope/history?days=0")
     assert resp.json()["days"] == 1
+
+# --- typo-tolerant search (/search) -----------------------------------
+# Runs against the real local search_index, same as the rest of this suite
+# runs against real local Postgres.
+
+def test_search_requires_no_exact_spelling():
+    # The whole point of the endpoint: this returned nothing at all under the
+    # old client-side substring match.
+    resp = client.get("/search?q=Budpest&country=HU&limit=5")
+    assert resp.status_code == 200
+    names = [r["name"] for r in resp.json()["results"]]
+    assert any("Budapest" in n for n in names)
+
+def test_search_folds_diacritics_the_rider_cannot_type():
+    # `Kraków Główny` was unreachable from an ASCII keyboard before the
+    # search_text folding existed - measured zero results.
+    resp = client.get("/search?q=Krakow&country=PL&limit=5")
+    names = [r["name"] for r in resp.json()["results"]]
+    assert any("Kraków" in n for n in names)
+
+def test_search_ranks_the_busy_station_above_the_lookalike():
+    # "Munchen" scored Munchhausen (0 observations) above München Hbf on pure
+    # trigram similarity. The popularity term is what fixed it.
+    resp = client.get("/search?q=Munchen&country=DE&limit=5")
+    results = resp.json()["results"]
+    assert results and results[0]["observations"] > 0
+
+def test_search_kind_filter_returns_only_that_kind():
+    resp = client.get("/search?q=Budapest&country=HU&kind=route&limit=10")
+    assert all(r["kind"] == "route" for r in resp.json()["results"])
+
+def test_search_empty_query_is_not_an_error():
+    resp = client.get("/search?q=%20%20&country=HU")
+    assert resp.status_code == 200
+    assert resp.json()["results"] == []
+
+def test_search_limit_is_clamped():
+    resp = client.get("/search?q=a&country=HU&limit=9999")
+    assert len(resp.json()["results"]) <= 50
+
+# --- SEO safety -------------------------------------------------------
+
+def test_thin_pages_are_excluded_from_the_sitemap():
+    resp = client.get("/sitemap.xml")
+    assert resp.status_code == 200
+    conn = api.get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT name FROM search_index
+        WHERE kind = 'station' AND observations < %s
+        LIMIT 1
+    """, (api._SEO_MIN_OBSERVATIONS,))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if row:
+        from urllib.parse import quote
+        assert f"/station/{quote(row[0])}" not in resp.text
+
+def test_a_thin_page_still_renders_but_says_noindex():
+    # The page is not removed - a rider following a link to a quiet halt
+    # still gets a real answer. It is only kept out of the index.
+    conn = api.get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT country_code, name FROM search_index
+        WHERE kind = 'station' AND observations = 0 LIMIT 1
+    """)
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row:
+        return
+    resp = client.get(f"/t/{row[0]}/station/{row[1]}")
+    assert resp.status_code == 200
+    assert 'content="noindex,follow"' in resp.text
+
+def test_a_busy_page_is_still_indexable():
+    resp = client.get("/t/HU/station/Budapest-Keleti")
+    assert resp.status_code == 200
+    assert "noindex" not in resp.text

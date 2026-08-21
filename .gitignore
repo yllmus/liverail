@@ -50,3 +50,6 @@
 !schema/003_trip_short_name.sql
 !schema/004_route_long_name.sql
 !schema/005_cancellations_platform.sql
+!search_text.py
+!tests/test_search_text.py
+!schema/006_search_index.sql
