@@ -217,7 +217,17 @@ def _routes_summary_query(country):
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [dict(r) for r in rows]
+    # route_display: friendly corridor/operator name alongside the raw
+    # route_name join key, additive only - same convention as
+    # stations/summary's display_name (never substituted, never reordered
+    # relative to the existing route_name field index.html already keys
+    # click-through off). See _route_display_map for why this is real data
+    # for AT/PL and legitimately absent for DE/HU.
+    route_mapping = _route_display_map(country)
+    out = [dict(r) for r in rows]
+    for r in out:
+        r["route_display"] = _display_route(route_mapping, r["route_name"])
+    return out
 
 @app.get("/routes/summary")
 def get_routes_summary(country: str = "HU"):
@@ -586,6 +596,76 @@ def _display_stop(mapping, raw, country):
         return raw
     return mapping.get(raw) or clean_display_name(raw, country) or raw
 
+# routes.name (short code) -> routes.long_name (friendly corridor/operator
+# name), for the raw AT/PL line codes item 7 flags. Same cache shape/TTL as
+# _display_map. DE's routes.long_name is confirmed 0/1061 filled (gtfs.de's
+# two static feeds simply don't carry it - see schema/004_route_long_name.sql)
+# so this mapping is legitimately empty for DE and every route falls through
+# to raw-code-only, same as before this existed - not a bug.
+_ROUTE_DISPLAY_CACHE = {}  # country_code -> {"map": {...}, "expires": epoch}
+
+def _route_display_map(country):
+    now = time.time()
+    cached = _ROUTE_DISPLAY_CACHE.get(country)
+    if cached is not None and now < cached["expires"]:
+        return cached["map"]
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # A short code can legitimately belong to more than one gtfs_route_id
+        # (confirmed: 10 PL / 55 AT / 187 DE names each cover multiple route
+        # rows - direction/branch variants sharing one line code). Rather
+        # than guess which is "the" long name, DISTINCT ON picks one
+        # deterministically (lowest id) per item 7's rule: the raw code stays
+        # authoritative everywhere this is used, the friendly name is best-
+        # effort supplementary context, never a replacement.
+        cur.execute("""
+            SELECT DISTINCT ON (name) name, long_name FROM routes
+            WHERE country_code = %s AND long_name IS NOT NULL
+            ORDER BY name, id
+        """, (country,))
+        mapping = dict(cur.fetchall())
+        if country == "AT":
+            # AT needs a second, different join, and PL/DE must not use it.
+            # AT's *live* route_name is a train identity ("NJ 456", "RJ 215"),
+            # not a line code - confirmed 0/40 live names match routes.name
+            # ("REX81", "S3") because they're separate namespaces, so the
+            # lookup above resolves nothing at all for AT's live board. The
+            # trip_short_name column imported for item 4's identity work
+            # bridges them: it holds exactly those live-style train
+            # identities and joins to a route. Ambiguous identities (one
+            # train number reaching corridors that disagree - 263/7982,
+            # 3.3%) are dropped rather than guessed, per item 7's "where
+            # ambiguous, keep the raw code" rule.
+            cur.execute("""
+                SELECT tsn, MIN(long_name) FROM (
+                    SELECT t.trip_short_name AS tsn, r.long_name
+                    FROM trips t JOIN routes r ON r.id = t.route_id
+                    WHERE t.country_code = %s
+                      AND t.trip_short_name IS NOT NULL AND r.long_name IS NOT NULL
+                    GROUP BY t.trip_short_name, r.long_name
+                ) x
+                GROUP BY tsn HAVING COUNT(*) = 1
+            """, (country,))
+            # Line-code entries stay as a fallback for anything the
+            # train-identity join misses; live rows hit the identity map.
+            mapping.update(dict(cur.fetchall()))
+    finally:
+        cur.close()
+        conn.close()
+    _ROUTE_DISPLAY_CACHE[country] = {"map": mapping, "expires": now + _DISPLAY_TTL}
+    return mapping
+
+def _display_route(mapping, raw):
+    # Unlike _display_stop, no clean_display_name-style fallback formatting -
+    # an unmapped route code just has no friendly name available (this is
+    # the norm for DE, and for AT/PL codes with no static match), and there
+    # is nothing to reformat a bare line code into. None here means "show
+    # only the raw code", handled by the caller/frontend.
+    if not raw:
+        return None
+    return mapping.get(raw)
+
 @app.get("/live/board")
 def get_live_board(country: str = "HU", limit: int = 300, q: str = ""):
     """Live board for the frontend: full-feed aggregates plus a capped,
@@ -599,6 +679,7 @@ def get_live_board(country: str = "HU", limit: int = 300, q: str = ""):
     """
     rows = get_live(country)
     mapping = _display_map(country)
+    route_mapping = _route_display_map(country)
 
     delays = [r["delay_minutes"] or 0 for r in rows]
     delayed = sum(1 for d in delays if d > 2)
@@ -628,6 +709,11 @@ def get_live_board(country: str = "HU", limit: int = 300, q: str = ""):
         # /station/{name}/stats, which matches on stations.name. Only ever
         # add the display label alongside it, never substitute it in.
         t["current_stop_display"] = _display_stop(mapping, r.get("current_stop"), country)
+        # Raw operator line code (AT/PL/DE) alongside a friendly name where
+        # one exists (route_name itself is left untouched - it's the join
+        # key /route/{name}/* uses). None for DE and any AT/PL code with no
+        # static match - see _route_display_map.
+        t["route_display"] = _display_route(route_mapping, r.get("route_name"))
         if r.get("stops"):
             t["stops"] = [
                 {**s, "display": _display_stop(mapping, s.get("name"), country)}
@@ -706,7 +792,7 @@ def get_live_worst(country: str = "HU", kind: str = "route", limit: int = 10):
             continue
         groups.setdefault(name, []).append(delay)
 
-    mapping = _display_map(country) if kind == "station" else None
+    mapping = _display_map(country) if kind == "station" else _route_display_map(country)
     worst = []
     for name, delays in groups.items():
         entry = {
@@ -717,6 +803,8 @@ def get_live_worst(country: str = "HU", kind: str = "route", limit: int = 10):
         }
         if kind == "station":
             entry["display_name"] = _display_stop(mapping, name, country)
+        else:
+            entry["display_name"] = _display_route(mapping, name)
         worst.append(entry)
     worst.sort(key=lambda e: e["avg_delay"], reverse=True)
 

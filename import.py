@@ -175,14 +175,25 @@ if os.path.exists(agency_path):
 print(f"Importing routes for {country}...")
 routes = pd.read_csv(f"{gtfs_dir}/routes.txt", dtype=str)
 for _, row in routes.iterrows():
-    name = _clean(row.get("route_short_name")) or _clean(row.get("route_long_name"))
+    short_name = _clean(row.get("route_short_name"))
+    long_name = _clean(row.get("route_long_name"))
+    name = short_name or long_name
+    # Only keep long_name as a separate friendly-name field when it's real
+    # extra information - i.e. short_name won the `name` slot above. When
+    # short_name was blank and long_name became `name` itself, storing it
+    # again here would just be the same string twice (see item 7's
+    # 004_route_long_name.sql for why this column exists at all: AT/PL's
+    # route_long_name is a real "origin - destination" corridor description
+    # that route_short_name-preferring `name` was discarding entirely).
+    friendly = long_name if (short_name and long_name and long_name != short_name) else None
     agency_name = agency_names.get(row.get("agency_id"))
     cur.execute("""
-        INSERT INTO routes (name, gtfs_route_id, route_type, country_code, agency_name)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO routes (name, gtfs_route_id, route_type, country_code, agency_name, long_name)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (country_code, gtfs_route_id) DO UPDATE SET
-            name = EXCLUDED.name, route_type = EXCLUDED.route_type, agency_name = EXCLUDED.agency_name
-    """, (name, args.route_id_prefix + row["route_id"], row.get("route_type"), country, agency_name))
+            name = EXCLUDED.name, route_type = EXCLUDED.route_type, agency_name = EXCLUDED.agency_name,
+            long_name = EXCLUDED.long_name
+    """, (name, args.route_id_prefix + row["route_id"], row.get("route_type"), country, agency_name, friendly))
 conn.commit()
 print(f"Imported {len(routes)} routes.")
 

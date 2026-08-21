@@ -1,0 +1,22 @@
+-- Migration: store GTFS routes.txt's route_long_name separately from the
+-- short code we already use as routes.name.
+--
+-- Why: item 7 of the 2026-08-20 worklist ("map raw operator line codes to
+-- human-readable route names"). import.py's routes import already reads
+-- route_long_name but only as a *fallback* when route_short_name is empty
+-- (`name = route_short_name or route_long_name`) - so for AT/PL, where
+-- route_short_name is filled almost everywhere, the descriptive long name
+-- was read from the GTFS file and immediately discarded. Checked directly
+-- against the real static feeds before adding this column: PL 181/181
+-- routes have a real route_long_name (e.g. "Katowice - Mysłowice - Kraków"),
+-- AT 268/273 (e.g. "Wien - Salzburg - Kufstein - Innsbruck - Bludenz -
+-- Bregenz"), DE 0/97 (fv_free) and 0/964 (rv_free) - completely absent,
+-- confirming NOTES.md's existing note that DE has no friendly-name data
+-- to map to. This column will simply stay NULL for DE and for HU (HU's own
+-- routes.name is already a real train-number identifier, not a raw code
+-- needing a friendly gloss).
+--
+-- Additive and nullable; nothing reads it until a consumer opts in.
+-- Safe to re-run.
+
+ALTER TABLE routes ADD COLUMN IF NOT EXISTS long_name TEXT;
