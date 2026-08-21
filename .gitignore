@@ -49,3 +49,4 @@
 !schema/002_service_calendar.sql
 !schema/003_trip_short_name.sql
 !schema/004_route_long_name.sql
+!schema/005_cancellations_platform.sql

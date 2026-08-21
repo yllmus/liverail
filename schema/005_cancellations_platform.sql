@@ -1,0 +1,73 @@
+-- Migration: make cancellations and platform numbers persistable.
+--
+-- Both are Phase 1 of the 2026-08-21 competitive-gap plan ("use what we
+-- already download"): neither needs a new data source, only a poller that
+-- stops discarding what the feeds already send every five minutes.
+--
+-- CANCELLATIONS. delay_observations.is_cancelled has existed since the
+-- schema was first written and was 0/15,467,336 true - every poller wrote a
+-- hardcoded `false`. Measured directly against the live feeds on 2026-08-21
+-- before writing any of this, because the two feeds that do report
+-- cancellation encode it in two genuinely different ways:
+--   PL (mkuran.pl)  - 55 trips flagged CANCELED at the *trip* level, and
+--                     they carry NO stop_time_updates at all, which is why
+--                     parse_pl_vehicles() dropped every one of them (it
+--                     requires a stop_time_update to produce a row). A
+--                     further 60 trips run but SKIP at least one stop.
+--   DE (gtfs.de)    - never sets the trip-level flag (0/7229). A fully
+--                     cancelled train instead appears as a trip whose stops
+--                     are *all* SKIPPED (508 trips); 731 have at least one.
+--   HU (MAV OTP)    - vehiclePositions can only describe trains that are
+--                     physically running, so a cancelled train is absent
+--                     rather than flagged. OTP models cancellation (its
+--                     realtimeState enum has CANCELED and the departure
+--                     board accepts omitCanceled:false) but MAV's instance
+--                     published none in a 6,124-stoptime sample.
+--   AT (OBB HAFAS)  - hafas-client sets stopover.cancelled from HAFAS's
+--                     aCncl/dCncl; 0/40 in a night sample.
+-- HU/AT are wired to read their respective field anyway (one expression
+-- each, on a call already being made) so the day either operator starts
+-- publishing cancellations we record them - but neither is claimed as real
+-- coverage. PL/DE are where the actual data is.
+--
+-- cancellation_kind exists because a single boolean cannot honestly hold
+-- both of the things above. "Your train is cancelled" and "your train still
+-- runs but skips this one stop" are different facts for a rider, and both
+-- feeds distinguish them, so we do too:
+--   'trip' - the whole service is cancelled (PL trip-level CANCELED, DE
+--            all-stops-skipped). Attributed to the trip's origin station,
+--            since a cancelled trip has no "current" stop.
+--   'stop' - this train runs but is not calling here (a SKIPPED stop).
+--   NULL   - not cancelled, or the feed cannot express cancellation.
+-- is_cancelled stays the simple flag every consumer can filter on; the kind
+-- refines it. Cancelled rows carry delay_minutes = NULL - a train that
+-- never arrives has no delay, and writing 0 there would have counted every
+-- cancellation as an on-time arrival in the reliability aggregates.
+--
+-- PLATFORM. Checked per feed rather than assumed, and it is genuinely
+-- uneven - documented here so nothing downstream reads a sparse column as a
+-- broken one:
+--   HU 77% (stop.platformCode on the live OTP response, 33/43 vehicles)
+--   AT 50% (HAFAS departure/arrivalPlatform, 20/40 train movements)
+--   DE  6% (platform_code on the static child stop rows the RT feed's
+--           stop_id already points at - 562/9161; gtfs.de mostly leaves it
+--           empty)
+--   PL  0% - no platform data anywhere in the feed. stop_time_properties
+--           .assigned_stop_id is 0/15,231, the feed sets no stop_id at all,
+--           and the static child rows carry no platform_code either.
+--
+-- Both columns are additive and nullable: every existing row keeps meaning
+-- exactly what it meant, and nothing reads either until a consumer opts in.
+-- Safe to re-run.
+
+ALTER TABLE delay_observations ADD COLUMN IF NOT EXISTS platform TEXT;
+ALTER TABLE delay_observations ADD COLUMN IF NOT EXISTS cancellation_kind TEXT;
+
+-- Partial index: cancellations are rare by nature (a few hundred rows a day
+-- against ~15.5M), so indexing only the true rows keeps this a few hundred
+-- kilobytes rather than a second index over the whole 12GB table. Every
+-- cancellation query - the live board's count, a station's cancelled
+-- departures, a route's cancellation rate - filters is_cancelled first.
+CREATE INDEX IF NOT EXISTS idx_delay_obs_cancelled
+    ON delay_observations (country_code, observed_date)
+    WHERE is_cancelled;

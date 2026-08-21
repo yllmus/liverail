@@ -1,49 +1,91 @@
 [
   {
     "tripId": "1|12345|0|86|20260801",
-    "line": { "name": "RJ 61", "mode": "train", "product": "national" },
+    "line": {
+      "name": "RJ 61",
+      "mode": "train",
+      "product": "national"
+    },
     "direction": "Wien Hbf",
-    "location": { "latitude": 48.185, "longitude": 16.375 },
+    "location": {
+      "latitude": 48.185,
+      "longitude": 16.375
+    },
     "nextStopovers": [
       {
-        "stop": { "name": "Wien Meidling" },
+        "stop": {
+          "name": "Wien Meidling"
+        },
         "arrival": "2026-08-01T09:12:00+02:00",
         "arrivalDelay": 180,
         "departure": "2026-08-01T09:13:00+02:00",
-        "departureDelay": 180
+        "departureDelay": 180,
+        "arrivalPlatform": "2A",
+        "plannedArrivalPlatform": "9",
+        "departurePlatform": "2A",
+        "plannedDeparturePlatform": "9"
       }
     ]
   },
   {
     "tripId": "1|54321|0|86|20260801",
-    "line": { "name": "S1", "mode": "train", "product": "suburban" },
+    "line": {
+      "name": "S1",
+      "mode": "train",
+      "product": "suburban"
+    },
     "direction": "Floridsdorf",
-    "location": { "latitude": 48.211, "longitude": 16.398 },
+    "location": {
+      "latitude": 48.211,
+      "longitude": 16.398
+    },
     "nextStopovers": [
       {
-        "stop": { "name": "Wien Praterstern" },
+        "stop": {
+          "name": "Wien Praterstern"
+        },
         "arrival": null,
         "arrivalDelay": null,
         "departure": "2026-08-01T09:15:00+02:00",
-        "departureDelay": 60
+        "departureDelay": 60,
+        "arrivalPlatform": null,
+        "plannedArrivalPlatform": null,
+        "departurePlatform": null,
+        "plannedDeparturePlatform": null
       }
     ]
   },
   {
     "tripId": "1|00000|0|86|20260801",
-    "line": { "name": "REX 7", "mode": "train", "product": "regional" },
+    "line": {
+      "name": "REX 7",
+      "mode": "train",
+      "product": "regional"
+    },
     "direction": "Nowhere",
-    "location": { "latitude": 47.5, "longitude": 15.0 },
+    "location": {
+      "latitude": 47.5,
+      "longitude": 15.0
+    },
     "nextStopovers": []
   },
   {
     "tripId": "1|99999|0|86|20260801",
-    "line": { "name": "Bus E3", "mode": "bus", "product": "bus" },
+    "line": {
+      "name": "Bus E3",
+      "mode": "bus",
+      "product": "bus"
+    },
     "direction": "Hütteldorf",
-    "location": { "latitude": 48.199, "longitude": 16.313 },
+    "location": {
+      "latitude": 48.199,
+      "longitude": 16.313
+    },
     "nextStopovers": [
       {
-        "stop": { "name": "Wien Breitensee" },
+        "stop": {
+          "name": "Wien Breitensee"
+        },
         "arrival": "2026-08-01T09:20:00+02:00",
         "arrivalDelay": 60,
         "departure": "2026-08-01T09:21:00+02:00",

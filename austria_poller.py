@@ -106,13 +106,28 @@ def parse_at_vehicles(movements):
         delay_seconds = stop.get("arrivalDelay")
         if delay_seconds is None:
             delay_seconds = stop.get("departureDelay")
-        if not stop_name or delay_seconds is None:
+        # hafas-client sets `cancelled` on a stopover from HAFAS's own
+        # aCncl/dCncl flags, and only when true (absent means not cancelled).
+        # 0/40 train movements in a real night sample - like HU, this is wired
+        # so a real cancellation is recorded if OBB publishes one, not because
+        # AT is known to have coverage. See
+        # schema/005_cancellations_platform.sql.
+        is_cancelled = bool(stop.get("cancelled"))
+        if not stop_name or (delay_seconds is None and not is_cancelled):
             continue
         location = m.get("location") or {}
         rows.append({
             "stop_name": stop_name,
             "route_name": route_name,
-            "delay_minutes": round(delay_seconds / 60, 2),
+            "delay_minutes": None if is_cancelled else round(delay_seconds / 60, 2),
+            "is_cancelled": is_cancelled,
+            "cancellation_kind": "stop" if is_cancelled else None,
+            # Real-time platform where HAFAS knows it, falling back to the
+            # planned one (20/40 train movements carried either in a real
+            # sample). radar() already returned all four fields; they were
+            # simply discarded.
+            "platform": (stop.get("departurePlatform") or stop.get("arrivalPlatform")
+                         or stop.get("plannedDeparturePlatform") or stop.get("plannedArrivalPlatform")),
             # HAFAS's radar movements already carry a destination string
             # (direction) and a live vehicle coordinate (location) - both
             # confirmed 100% filled across a real sample of 122 train
@@ -146,7 +161,8 @@ def poll():
     count = 0
     resolved_count = 0
     for row in rows:
-        print(f"  {row['route_name']} at {row['stop_name']}: {row['delay_minutes']}")
+        state = "CANCELLED" if row["is_cancelled"] else row["delay_minutes"]
+        print(f"  {row['route_name']} at {row['stop_name']}: {state}")
         # Real GPS straight off HAFAS's radar (not the schedule-interpolated
         # estimate PL/DE fall back to) - tagged explicitly so a consumer
         # never has to guess which kind of position a row holds.
@@ -156,15 +172,16 @@ def poll():
             resolved_count += 1
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id, trip_id)
-            SELECT s.id, %s, NOW(), %s, false, %s, %s, %s, %s, %s, %s, %s, %s
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id, trip_id, cancellation_kind, platform)
+            SELECT s.id, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             FROM stations s
             WHERE s.name = ANY(%s) AND s.country_code = %s
             ORDER BY array_position(%s, s.name)
             LIMIT 1
         """, (
-            date.today(), row["delay_minutes"], row["route_name"], COUNTRY_CODE,
+            date.today(), row["delay_minutes"], row["is_cancelled"], row["route_name"], COUNTRY_CODE,
             row["headsign"], row["lat"], row["lon"], position_source, row["live_trip_id"], trip_id,
+            row["cancellation_kind"], row["platform"],
             station_name_candidates(row["stop_name"]), COUNTRY_CODE,
             station_name_candidates(row["stop_name"]),
         ))

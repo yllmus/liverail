@@ -21,7 +21,29 @@ def test_parse_vehicles_extracts_rows_with_delay():
         "lon": 19.6906,
         "live_trip_id": "HU:1:1234",
         "train_number": None,
+        "is_cancelled": False,
+        "cancellation_kind": None,
+        "platform": "3",
     }
+
+def test_parse_vehicles_leaves_platform_none_when_mav_omits_it():
+    # ~23% of live vehicles carry no platformCode; that must stay NULL rather
+    # than being inferred from anything else.
+    rows = parse_vehicles(load_fixture())
+    szolnok = next(r for r in rows if r["stop_name"] == "Szolnok")
+    assert szolnok["platform"] is None
+
+def test_parse_vehicles_reads_a_cancelled_realtime_state():
+    # MAV publishes no cancellations today (0 in a 6,124-stoptime sample) and
+    # a vehiclePositions query structurally cannot show a train that isn't
+    # running - this exists so a real CANCELED is recorded if that changes,
+    # not because HU has cancellation coverage.
+    data = load_fixture()
+    data["data"]["vehiclePositions"][0]["prevOrCurrentStop"]["realtimeState"] = "CANCELED"
+    rows = parse_vehicles(data)
+    assert rows[0]["is_cancelled"] is True
+    assert rows[0]["cancellation_kind"] == "stop"
+    assert rows[0]["delay_minutes"] is None
 
 def test_parse_vehicles_falls_back_to_departure_delay():
     rows = parse_vehicles(load_fixture())

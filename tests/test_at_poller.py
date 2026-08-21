@@ -21,7 +21,39 @@ def test_parse_at_vehicles_extracts_rows_with_delay():
         "lon": 16.375,
         "live_trip_id": "1|12345|0|86|20260801",
         "train_number": "61",
+        "is_cancelled": False,
+        "cancellation_kind": None,
+        "platform": "2A",
     }
+
+def test_parse_at_vehicles_reads_a_cancelled_stopover():
+    # hafas-client only sets `cancelled` when HAFAS's own aCncl/dCncl is set,
+    # so its absence means "not cancelled" rather than "unknown".
+    movements = load_fixture()
+    movements[0]["nextStopovers"][0]["cancelled"] = True
+    rows = parse_at_vehicles(movements)
+    assert rows[0]["is_cancelled"] is True
+    assert rows[0]["cancellation_kind"] == "stop"
+    assert rows[0]["delay_minutes"] is None
+
+def test_parse_at_vehicles_keeps_a_cancelled_stopover_that_has_no_delay():
+    # A cancelled stop has no delay to report, which the old parser treated as
+    # a reason to discard the row entirely.
+    movements = load_fixture()
+    stopover = movements[0]["nextStopovers"][0]
+    stopover["cancelled"] = True
+    stopover["arrivalDelay"] = None
+    stopover["departureDelay"] = None
+    rows = parse_at_vehicles(movements)
+    assert rows[0]["is_cancelled"] is True
+
+def test_parse_at_vehicles_falls_back_to_the_planned_platform():
+    movements = load_fixture()
+    stopover = movements[0]["nextStopovers"][0]
+    stopover["departurePlatform"] = None
+    stopover["arrivalPlatform"] = None
+    rows = parse_at_vehicles(movements)
+    assert rows[0]["platform"] == "9"
 
 def test_parse_at_vehicles_extracts_train_number():
     rows = parse_at_vehicles(load_fixture())

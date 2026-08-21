@@ -32,6 +32,30 @@ def make_feed():
 
     return feed
 
+def make_cancelled_feed():
+    # The two shapes mkuran.pl actually uses, confirmed against the real feed
+    # on 2026-08-21: a whole-trip CANCELED carries no stop_time_updates at all
+    # (55/55 of them), and a train that still runs but drops a stop marks that
+    # stop SKIPPED with no arrival/departure time on it.
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.header.gtfs_realtime_version = "2.0"
+
+    e1 = feed.entity.add()
+    e1.id = "c1"
+    e1.trip_update.trip.trip_id = "CANCELLED_TRIP"
+    e1.trip_update.trip.start_date = "20260801"
+    e1.trip_update.trip.schedule_relationship = gtfs_realtime_pb2.TripDescriptor.CANCELED
+
+    e2 = feed.entity.add()
+    e2.id = "c2"
+    e2.trip_update.trip.trip_id = "SKIPS_A_STOP"
+    e2.trip_update.trip.start_date = "20260801"
+    stu = e2.trip_update.stop_time_update.add()
+    stu.stop_sequence = 4
+    stu.schedule_relationship = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED
+
+    return feed
+
 def test_parse_pl_vehicles_extracts_raw_rows():
     rows = parse_pl_vehicles(make_feed())
     assert len(rows) == 2
@@ -40,7 +64,24 @@ def test_parse_pl_vehicles_extracts_raw_rows():
         "start_date": "20260801",
         "stop_sequence": 3,
         "actual_epoch": 1785551442,
+        "cancellation_kind": None,
     }
+
+def test_parse_pl_vehicles_keeps_cancelled_trip_with_no_stop_time_updates():
+    # This is the regression that made is_cancelled 0/15.5M: the old parser
+    # required a stop_time_update, and a cancelled trip has none.
+    rows = parse_pl_vehicles(make_cancelled_feed())
+    row = next(r for r in rows if r["gtfs_trip_id"] == "CANCELLED_TRIP")
+    assert row["cancellation_kind"] == "trip"
+    assert row["stop_sequence"] is None
+    assert row["actual_epoch"] is None
+
+def test_parse_pl_vehicles_flags_a_skipped_stop_as_stop_scoped():
+    rows = parse_pl_vehicles(make_cancelled_feed())
+    row = next(r for r in rows if r["gtfs_trip_id"] == "SKIPS_A_STOP")
+    assert row["cancellation_kind"] == "stop"
+    assert row["stop_sequence"] == 4
+    assert row["actual_epoch"] is None
 
 def test_parse_pl_vehicles_falls_back_to_departure_time():
     rows = parse_pl_vehicles(make_feed())
@@ -138,6 +179,59 @@ def test_resolve_delays_dedupes_same_trip_id_across_start_dates():
     resolved = resolve_delays(cur, rows)
     assert len(resolved) == 1
     assert resolved[0]["trip_id"] == 7
+
+def test_resolve_delays_resolves_a_cancelled_trip_to_its_origin():
+    # A cancelled trip has no stop_sequence to match on, so resolve_delays
+    # takes the trip's first scheduled stop instead - where a rider would
+    # actually have been waiting.
+    cur = _FakeCursor([
+        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7),
+    ])
+    rows = [{
+        "gtfs_trip_id": "CANCELLED_TRIP", "start_date": "20260801",
+        "stop_sequence": None, "actual_epoch": None, "cancellation_kind": "trip",
+    }]
+    resolved = resolve_delays(cur, rows)
+    assert len(resolved) == 1
+    assert resolved[0]["is_cancelled"] is True
+    assert resolved[0]["cancellation_kind"] == "trip"
+    # NULL, not 0 - a train that never arrives has no delay, and a 0 here
+    # would count every cancellation as an on-time arrival in the aggregates.
+    assert resolved[0]["delay_minutes"] is None
+    # No position is interpolated toward a stop the train will never reach.
+    assert resolved[0]["lat"] is None
+    assert resolved[0]["position_source"] is None
+    assert resolved[0]["station_id"] == 42
+    assert resolved[0]["trip_id"] == 7
+
+def test_resolve_delays_marks_a_skipped_stop_without_touching_the_delay():
+    cur = _FakeCursor([
+        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7),
+    ])
+    rows = [{
+        "gtfs_trip_id": "SKIPS_A_STOP", "start_date": "20260801",
+        "stop_sequence": 4, "actual_epoch": None, "cancellation_kind": "stop",
+    }]
+    resolved = resolve_delays(cur, rows)
+    assert resolved[0]["cancellation_kind"] == "stop"
+    assert resolved[0]["is_cancelled"] is True
+    assert resolved[0]["delay_minutes"] is None
+
+def test_resolve_delays_marks_normal_rows_as_not_cancelled():
+    scheduled = _scheduled_epoch("20260801", "09:59:00")
+    cur = _FakeCursor([
+        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7),
+        None,
+    ])
+    rows = [{
+        "gtfs_trip_id": "T1", "start_date": "20260801",
+        "stop_sequence": 3, "actual_epoch": scheduled + 60, "cancellation_kind": None,
+    }]
+    resolved = resolve_delays(cur, rows)
+    assert resolved[0]["is_cancelled"] is False
+    assert resolved[0]["cancellation_kind"] is None
+    # PL is the one country with no platform data in any of its sources.
+    assert resolved[0]["platform"] is None
 
 def test_resolve_delays_skips_unmatched_trips():
     cur = _FakeCursor(None)

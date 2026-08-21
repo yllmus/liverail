@@ -44,13 +44,47 @@ def parse_pl_vehicles(feed):
         trip_update = entity.trip_update
         gtfs_trip_id = trip_update.trip.trip_id
         start_date = trip_update.trip.start_date
-        if not gtfs_trip_id or not start_date or not trip_update.stop_time_update:
+        if not gtfs_trip_id or not start_date:
+            continue
+
+        # A cancelled trip carries no stop_time_updates at all (confirmed:
+        # 55/55 of the feed's CANCELED trips had zero), so the
+        # stop_time_update requirement below used to drop every single one -
+        # the whole reason is_cancelled was never once written. There is no
+        # "current stop" to attribute it to either; resolve_delays() uses the
+        # trip's scheduled origin instead.
+        if trip_update.trip.schedule_relationship == gtfs_realtime_pb2.TripDescriptor.CANCELED:
+            rows.append({
+                "gtfs_trip_id": gtfs_trip_id,
+                "start_date": start_date,
+                "stop_sequence": None,
+                "actual_epoch": None,
+                "cancellation_kind": "trip",
+            })
+            continue
+
+        if not trip_update.stop_time_update:
             continue
         # Take the first stop_time_update only, same choice the original
         # design made (and the same choice AT's nextStopovers[0] makes) -
         # one "current" delay figure per trip per poll, not a prediction
         # for every remaining stop on the route.
         stu = trip_update.stop_time_update[0]
+
+        # A SKIPPED stop means the train runs but is not calling here. It has
+        # no arrival/departure time (there is no arrival to predict), so it
+        # would fail the actual_epoch check below and be discarded - which is
+        # exactly the information a rider waiting at that stop needs most.
+        if stu.schedule_relationship == gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED:
+            rows.append({
+                "gtfs_trip_id": gtfs_trip_id,
+                "start_date": start_date,
+                "stop_sequence": stu.stop_sequence,
+                "actual_epoch": None,
+                "cancellation_kind": "stop",
+            })
+            continue
+
         actual_epoch = None
         if stu.HasField("arrival") and stu.arrival.HasField("time"):
             actual_epoch = stu.arrival.time
@@ -63,6 +97,7 @@ def parse_pl_vehicles(feed):
             "start_date": start_date,
             "stop_sequence": stu.stop_sequence,
             "actual_epoch": actual_epoch,
+            "cancellation_kind": None,
         })
     return rows
 
@@ -110,20 +145,60 @@ def resolve_delays(cur, rows, now_epoch=None):
         now_epoch = time.time()
     resolved = []
     for row in rows:
-        cur.execute("""
-            SELECT st.station_id, st.scheduled_arrival, st.scheduled_departure,
-                   s.name, s.lat, s.lon, r.name, t.headsign, t.id
-            FROM trips t
-            JOIN stop_times st ON st.trip_id = t.id AND st.stop_sequence = %s
-            JOIN stations s ON s.id = st.station_id
-            JOIN routes r ON r.id = t.route_id
-            WHERE t.gtfs_trip_id = %s AND t.country_code = %s
-        """, (row["stop_sequence"], row["gtfs_trip_id"], COUNTRY_CODE))
+        kind = row.get("cancellation_kind")
+        if kind == "trip":
+            # No stop_sequence to match on - a cancelled trip publishes no
+            # stop_time_updates. Attribute it to the trip's scheduled origin,
+            # which is where a rider would have been standing.
+            cur.execute("""
+                SELECT st.station_id, st.scheduled_arrival, st.scheduled_departure,
+                       s.name, s.lat, s.lon, r.name, t.headsign, t.id
+                FROM trips t
+                JOIN stop_times st ON st.trip_id = t.id
+                JOIN stations s ON s.id = st.station_id
+                JOIN routes r ON r.id = t.route_id
+                WHERE t.gtfs_trip_id = %s AND t.country_code = %s
+                ORDER BY st.stop_sequence
+                LIMIT 1
+            """, (row["gtfs_trip_id"], COUNTRY_CODE))
+        else:
+            cur.execute("""
+                SELECT st.station_id, st.scheduled_arrival, st.scheduled_departure,
+                       s.name, s.lat, s.lon, r.name, t.headsign, t.id
+                FROM trips t
+                JOIN stop_times st ON st.trip_id = t.id AND st.stop_sequence = %s
+                JOIN stations s ON s.id = st.station_id
+                JOIN routes r ON r.id = t.route_id
+                WHERE t.gtfs_trip_id = %s AND t.country_code = %s
+            """, (row["stop_sequence"], row["gtfs_trip_id"], COUNTRY_CODE))
         match = cur.fetchone()
         if not match:
             continue
         (station_id, sched_arrival, sched_departure, station_name,
          target_lat, target_lon, route_name, headsign, trip_id) = match
+
+        if kind:
+            # A train that is not calling here has no delay - not zero. Writing
+            # 0 would count every cancellation as an on-time arrival in the
+            # reliability aggregates, and no position is estimated either
+            # (interpolating toward a stop the train will never make would
+            # draw a marker for a journey that isn't happening).
+            resolved.append({
+                "station_id": station_id,
+                "station_name": station_name,
+                "route_name": route_name,
+                "headsign": headsign,
+                "delay_minutes": None,
+                "lat": None,
+                "lon": None,
+                "position_source": None,
+                "trip_id": trip_id,
+                "gtfs_trip_id": row["gtfs_trip_id"],
+                "is_cancelled": True,
+                "cancellation_kind": kind,
+                "platform": None,
+            })
+            continue
         scheduled_epoch = _scheduled_epoch(row["start_date"], sched_arrival or sched_departure)
         if scheduled_epoch is None:
             continue
@@ -180,6 +255,14 @@ def resolve_delays(cur, rows, now_epoch=None):
             # the rest of the journey's stop_time_updates live) - our own
             # trip_id can't address the feed.
             "gtfs_trip_id": row["gtfs_trip_id"],
+            "is_cancelled": False,
+            "cancellation_kind": None,
+            # PL is the one country with no platform data anywhere: the feed
+            # sets no stop_id, stop_time_properties.assigned_stop_id is
+            # 0/15231, and the static child rows carry no platform_code
+            # either. Present and always None so every country's resolved row
+            # has the same shape.
+            "platform": None,
         })
     # mkuran.pl's live feed can legitimately carry two simultaneously-active
     # entities for the same recurring gtfs_trip_id at once (e.g. an overnight
@@ -221,35 +304,49 @@ def poll():
     # once and then never again - every later day silently vanished. Comparing
     # within the service day gives each trip at least one row per day while
     # still collapsing the repeat-every-5-minutes noise this was written for.
+    # Compared as a (delay, cancelled) pair, not delay alone: a trip that gets
+    # cancelled goes from some delay to delay NULL, and a NULL never equals
+    # anything in Python's `==` sense against a float - but a trip already
+    # recorded as cancelled would otherwise re-write an identical row every
+    # 5 minutes for the rest of the day, since NULL == NULL is True here.
+    # Pairing them keeps both transitions (running -> cancelled and cancelled
+    # -> running again) as real, recorded events while still collapsing the
+    # repeat-every-poll noise this dedup was written for.
     trip_ids = [row["trip_id"] for row in resolved]
     cur.execute("""
-        SELECT DISTINCT ON (trip_id) trip_id, delay_minutes
+        SELECT DISTINCT ON (trip_id) trip_id, delay_minutes, is_cancelled
         FROM delay_observations
         WHERE trip_id = ANY(%s) AND observed_date = %s
         ORDER BY trip_id, id DESC
     """, (trip_ids, date.today()))
-    last_delay = dict(cur.fetchall())
+    last_state = {r[0]: (r[1], bool(r[2])) for r in cur.fetchall()}
 
     count = 0
     skipped = 0
+    cancelled_count = 0
     for row in resolved:
-        if last_delay.get(row["trip_id"]) == row["delay_minutes"]:
+        if last_state.get(row["trip_id"]) == (row["delay_minutes"], row["is_cancelled"]):
             skipped += 1
             continue
-        print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
+        if row["is_cancelled"]:
+            cancelled_count += 1
+            print(f"  {row['route_name']} at {row['station_name']}: CANCELLED ({row['cancellation_kind']})")
+        else:
+            print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, trip_id)
-            VALUES (%s, CURRENT_DATE, NOW(), %s, false, %s, %s, %s, %s, %s, %s, %s)
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, trip_id, cancellation_kind, platform)
+            VALUES (%s, CURRENT_DATE, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            row["station_id"], row["delay_minutes"], row["route_name"], COUNTRY_CODE, row["headsign"],
-            row["lat"], row["lon"], row["position_source"], row["trip_id"],
+            row["station_id"], row["delay_minutes"], row["is_cancelled"], row["route_name"],
+            COUNTRY_CODE, row["headsign"], row["lat"], row["lon"], row["position_source"],
+            row["trip_id"], row["cancellation_kind"], row["platform"],
         ))
         count += 1
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Saved {count} observations, skipped {skipped} unchanged.")
+    print(f"Saved {count} observations ({cancelled_count} cancelled), skipped {skipped} unchanged.")
 
 if __name__ == "__main__":
     poll()

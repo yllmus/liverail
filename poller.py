@@ -28,8 +28,8 @@ QUERY = """
     lat
     lon
     trip { gtfsId tripShortName tripHeadsign route { longName } }
-    stopRelationship { stop { gtfsId name } }
-    prevOrCurrentStop { arrivalDelay departureDelay }
+    stopRelationship { stop { gtfsId name platformCode } }
+    prevOrCurrentStop { arrivalDelay departureDelay realtimeState }
   }
 }
 """
@@ -43,15 +43,32 @@ def parse_vehicles(data):
         prev = v.get("prevOrCurrentStop")
         if not trip or not stop_rel or not prev:
             continue
-        stop_name = stop_rel.get("stop", {}).get("name")
+        stop = stop_rel.get("stop") or {}
+        stop_name = stop.get("name")
         route_name = clean_route_name(trip.get("route", {}).get("longName"), trip.get("tripShortName"))
         delay_seconds = prev.get("arrivalDelay") or prev.get("departureDelay")
-        if not stop_name or delay_seconds is None:
+        # OTP's realtimeState enum includes CANCELED, and MAV's endpoint
+        # accepts omitCanceled:false on its departure boards - but a
+        # vehiclePositions query can only describe trains that are physically
+        # running, so a cancelled service is absent rather than flagged, and a
+        # 6,124-stoptime sample of MAV's own board returned zero CANCELED.
+        # Read anyway (it costs one field on a call already being made) so we
+        # record cancellations the day MAV starts publishing them - but HU is
+        # not claimed as having real cancellation coverage. See
+        # schema/005_cancellations_platform.sql.
+        is_cancelled = prev.get("realtimeState") == "CANCELED"
+        if not stop_name or (delay_seconds is None and not is_cancelled):
             continue
         rows.append({
             "stop_name": stop_name,
             "route_name": route_name,
-            "delay_minutes": round(delay_seconds / 60, 2),
+            "delay_minutes": None if is_cancelled else round(delay_seconds / 60, 2),
+            "is_cancelled": is_cancelled,
+            "cancellation_kind": "stop" if is_cancelled else None,
+            # Best-filled platform data of the four countries (33/43 vehicles
+            # in a real sample) - it was on the stop object all along and
+            # simply never requested.
+            "platform": stop.get("platformCode"),
             # Destination text and live coordinates — both come straight off
             # this same GraphQL response but were being discarded before;
             # confirmed present on the real endpoint (tripHeadsign, lat/lon)
@@ -133,7 +150,8 @@ def poll():
     count = 0
     resolved_count = 0
     for row in rows:
-        print(f"  {row['route_name']} at {row['stop_name']}: {row['delay_minutes']}")
+        state = "CANCELLED" if row["is_cancelled"] else row["delay_minutes"]
+        print(f"  {row['route_name']} at {row['stop_name']}: {state}")
         # Real GPS straight off the live feed (not the schedule-interpolated
         # estimate PL/DE fall back to) - tagged explicitly so a consumer
         # never has to guess which kind of position a row holds.
@@ -143,13 +161,14 @@ def poll():
             resolved_count += 1
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id, trip_id)
-            SELECT s.id, %s, NOW(), %s, false, %s, %s, %s, %s, %s, %s, %s, %s
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id, trip_id, cancellation_kind, platform)
+            SELECT s.id, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             FROM stations s
             WHERE s.name = %s AND s.country_code = %s
         """, (
-            date.today(), row["delay_minutes"], row["route_name"], COUNTRY_CODE,
+            date.today(), row["delay_minutes"], row["is_cancelled"], row["route_name"], COUNTRY_CODE,
             row["headsign"], row["lat"], row["lon"], position_source, row["live_trip_id"], trip_id,
+            row["cancellation_kind"], row["platform"],
             row["stop_name"], COUNTRY_CODE,
         ))
         count += 1

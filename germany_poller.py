@@ -17,6 +17,16 @@ DB_CONFIG = {
 
 COUNTRY_CODE = "DE"
 
+# Same guard poland_poller.py and api.py already apply, which germany_poller.py
+# was missing - found 2026-08-21 while verifying the cancellation work: a real
+# poll wrote "RB33 at Bad Kreuznach: -1299.0", and 7 rows beyond +/-12h had
+# landed in a single day. gtfs.de's delay is feed-native (no schedule join, so
+# not PL's stop_sequence-renumbering cause) but the feed still occasionally
+# publishes a nonsense figure, most often a large negative one. A train is not
+# 21 hours early; that is a bad record, and averaging it into a route's
+# reliability silently corrupts every statistic built on top of it.
+MAX_PLAUSIBLE_DELAY_MIN = 720
+
 GTFS_RT_URL = "https://realtime.gtfs.de/realtime-free.pb"
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
@@ -41,6 +51,23 @@ def load_parent_map():
                 if parent:
                     parent_map[row["stop_id"]] = parent
     return parent_map
+
+def load_platform_map():
+    # The RT feed's stop_id is always a platform-level child row (see
+    # GTFS_STOPS_FILES above), so the platform a train is actually calling at
+    # is knowable from the static feed without any extra live data - but only
+    # where gtfs.de bothered to fill platform_code, which is 562/9161 child
+    # rows (6%). Sparse by source, not by bug: DE simply has far less platform
+    # data published than HU (77%) or AT (50%), and the column stays NULL for
+    # the rest rather than guessing from the stop name.
+    platform_map = {}
+    for path in GTFS_STOPS_FILES:
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                code = (row.get("platform_code") or "").strip()
+                if code:
+                    platform_map[row["stop_id"]] = code
+    return platform_map
 
 def fetch_feed():
     resp = requests.get(GTFS_RT_URL, timeout=30)
@@ -68,6 +95,27 @@ def parse_de_vehicles(feed):
         # per poll, same choice AT's nextStopovers[0] and PL's stu[0] make.
         stu = trip_update.stop_time_update[0]
         gtfs_stop_id = stu.stop_id
+
+        # gtfs.de never uses the trip-level CANCELED flag (confirmed 0/7229),
+        # so a fully cancelled train is only recognizable as one whose stops
+        # are *all* SKIPPED - 508 trips in a real poll, against 731 with at
+        # least one skipped stop. Both were silently dropped before this: a
+        # skipped stop publishes no delay, so it failed the delay check below.
+        skipped = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED
+        if stu.schedule_relationship == skipped:
+            all_skipped = all(
+                s.schedule_relationship == skipped for s in trip_update.stop_time_update
+            )
+            if gtfs_stop_id:
+                rows.append({
+                    "gtfs_trip_id": gtfs_trip_id,
+                    "gtfs_stop_id": gtfs_stop_id,
+                    "delay_minutes": None,
+                    "start_date": trip_update.trip.start_date or None,
+                    "cancellation_kind": "trip" if all_skipped else "stop",
+                })
+            continue
+
         delay_seconds = None
         if stu.HasField("arrival") and stu.arrival.HasField("delay"):
             delay_seconds = stu.arrival.delay
@@ -75,14 +123,18 @@ def parse_de_vehicles(feed):
             delay_seconds = stu.departure.delay
         if not gtfs_stop_id or delay_seconds is None:
             continue
+        delay_minutes = round(delay_seconds / 60, 2)
+        if abs(delay_minutes) > MAX_PLAUSIBLE_DELAY_MIN:
+            continue
         rows.append({
             "gtfs_trip_id": gtfs_trip_id,
             "gtfs_stop_id": gtfs_stop_id,
-            "delay_minutes": round(delay_seconds / 60, 2),
+            "delay_minutes": delay_minutes,
             # Needed to turn a scheduled stop_times HH:MM:SS into an actual
             # epoch for position estimation (see resolve_delays) - not used
             # for the delay figure itself, which stays feed-native.
             "start_date": trip_update.trip.start_date or None,
+            "cancellation_kind": None,
         })
     return rows
 
@@ -118,7 +170,7 @@ def _interpolate_position(prev_lat, prev_lon, prev_epoch, target_lat, target_lon
     lon = prev_lon + fraction * (target_lon - prev_lon)
     return lat, lon
 
-def resolve_delays(cur, rows, parent_map=None, now_epoch=None):
+def resolve_delays(cur, rows, parent_map=None, now_epoch=None, platform_map=None):
     # DB-dependent step. gtfs_trip_id resolves directly against our trips
     # table. gtfs_stop_id does not: it's always a platform-level child id
     # (see load_parent_map() above), so it's translated to its parent
@@ -137,6 +189,8 @@ def resolve_delays(cur, rows, parent_map=None, now_epoch=None):
     # degrades to no estimated position rather than losing the observation.
     if parent_map is None:
         parent_map = load_parent_map()
+    if platform_map is None:
+        platform_map = load_platform_map()
     if now_epoch is None:
         now_epoch = time.time()
     resolved = []
@@ -144,6 +198,7 @@ def resolve_delays(cur, rows, parent_map=None, now_epoch=None):
         parent_stop_id = parent_map.get(row["gtfs_stop_id"])
         if not parent_stop_id:
             continue
+        platform = platform_map.get(row["gtfs_stop_id"])
         cur.execute("""
             SELECT s.id, s.name, s.lat, s.lon, r.name, t.id,
                    st.scheduled_arrival, st.scheduled_departure
@@ -159,6 +214,27 @@ def resolve_delays(cur, rows, parent_map=None, now_epoch=None):
             continue
         (station_id, station_name, target_lat, target_lon, route_name,
          trip_id, target_sched_arrival, target_sched_departure) = match
+
+        if row.get("cancellation_kind"):
+            # Same reasoning as poland_poller: a train that is not calling here
+            # has no delay (NULL, not 0, which would read as an on-time
+            # arrival in the aggregates), and no position is interpolated
+            # toward a stop it will never make.
+            resolved.append({
+                "station_id": station_id,
+                "station_name": station_name,
+                "route_name": route_name,
+                "delay_minutes": None,
+                "lat": None,
+                "lon": None,
+                "position_source": None,
+                "trip_id": trip_id,
+                "gtfs_trip_id": row["gtfs_trip_id"],
+                "is_cancelled": True,
+                "cancellation_kind": row["cancellation_kind"],
+                "platform": platform,
+            })
+            continue
 
         lat = lon = None
         position_source = None
@@ -203,6 +279,9 @@ def resolve_delays(cur, rows, parent_map=None, now_epoch=None):
             # own trip id, needed by /train/{country}/{id} to locate the rest
             # of this trip's stop_time_updates in a fresh feed.
             "gtfs_trip_id": row["gtfs_trip_id"],
+            "is_cancelled": False,
+            "cancellation_kind": None,
+            "platform": platform,
         })
     return resolved
 
@@ -222,35 +301,45 @@ def poll():
     # Scoped to today - see the same block in poland_poller.py for why the
     # unscoped version silently dropped every recurring trip whose delay
     # matched its last recorded value (43.2% of DE trip_ids recur across days).
+    # Compared as a (delay, cancelled) pair - see the same block in
+    # poland_poller.py for why the delay alone is not enough once a row can be
+    # cancelled (a cancellation carries delay NULL, and NULL == NULL here
+    # would otherwise re-write an identical cancelled row every 5 minutes).
     trip_ids = [row["trip_id"] for row in resolved]
     cur.execute("""
-        SELECT DISTINCT ON (trip_id) trip_id, delay_minutes
+        SELECT DISTINCT ON (trip_id) trip_id, delay_minutes, is_cancelled
         FROM delay_observations
         WHERE trip_id = ANY(%s) AND observed_date = %s
         ORDER BY trip_id, id DESC
     """, (trip_ids, date.today()))
-    last_delay = dict(cur.fetchall())
+    last_state = {r[0]: (r[1], bool(r[2])) for r in cur.fetchall()}
 
     count = 0
     skipped = 0
+    cancelled_count = 0
     for row in resolved:
-        if last_delay.get(row["trip_id"]) == row["delay_minutes"]:
+        if last_state.get(row["trip_id"]) == (row["delay_minutes"], row["is_cancelled"]):
             skipped += 1
             continue
-        print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
+        if row["is_cancelled"]:
+            cancelled_count += 1
+            print(f"  {row['route_name']} at {row['station_name']}: CANCELLED ({row['cancellation_kind']})")
+        else:
+            print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, lat, lon, position_source, trip_id)
-            VALUES (%s, CURRENT_DATE, NOW(), %s, false, %s, %s, %s, %s, %s, %s)
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, lat, lon, position_source, trip_id, cancellation_kind, platform)
+            VALUES (%s, CURRENT_DATE, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            row["station_id"], row["delay_minutes"], row["route_name"], COUNTRY_CODE,
-            row["lat"], row["lon"], row["position_source"], row["trip_id"],
+            row["station_id"], row["delay_minutes"], row["is_cancelled"], row["route_name"],
+            COUNTRY_CODE, row["lat"], row["lon"], row["position_source"], row["trip_id"],
+            row["cancellation_kind"], row["platform"],
         ))
         count += 1
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Saved {count} observations, skipped {skipped} unchanged.")
+    print(f"Saved {count} observations ({cancelled_count} cancelled), skipped {skipped} unchanged.")
 
 if __name__ == "__main__":
     poll()

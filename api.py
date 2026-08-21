@@ -12,6 +12,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from google.transit import gtfs_realtime_pb2
 from austria_poller import call_radar, call_trip, parse_at_vehicles
 from poland_poller import fetch_feed, parse_pl_vehicles, resolve_delays, _scheduled_epoch
 from germany_poller import (
@@ -19,6 +20,7 @@ from germany_poller import (
     parse_de_vehicles,
     resolve_delays as resolve_de_delays,
     load_parent_map,
+    load_platform_map,
 )
 from station_names import clean_display_name
 from hu_route_names import clean_route_name
@@ -427,10 +429,10 @@ GRAPHQL_QUERY = """
       tripShortName
       tripHeadsign
       route { longName }
-      stoptimes { stop { name lat lon } scheduledDeparture departureDelay scheduledArrival arrivalDelay }
+      stoptimes { stop { name lat lon platformCode } scheduledDeparture departureDelay scheduledArrival arrivalDelay realtimeState }
     }
-    stopRelationship { stop { name lat lon } status }
-    prevOrCurrentStop { arrivalDelay departureDelay }
+    stopRelationship { stop { name lat lon platformCode } status }
+    prevOrCurrentStop { arrivalDelay departureDelay realtimeState }
   }
 }
 """
@@ -476,12 +478,20 @@ def _live_result(rows, stop_key):
             "train_id": row.get("live_trip_id") or row.get("gtfs_trip_id"),
             "current_stop": row[stop_key],
             "delay_minutes": row["delay_minutes"],
-            "status": "IN_TRANSIT_TO",
+            "status": "CANCELLED" if row.get("is_cancelled") else "IN_TRANSIT_TO",
             "stops": [],
             "stop_idx": None,
             "lat": row.get("lat"),
             "lon": row.get("lon"),
             "position_source": row.get("position_source"),
+            # A cancelled train carries delay_minutes = None, so every consumer
+            # must branch on this rather than on the delay - "no delay figure"
+            # and "not running" look identical otherwise. cancellation_kind
+            # separates "the whole service is cancelled" from "it runs but
+            # skips this stop"; see schema/005_cancellations_platform.sql.
+            "is_cancelled": bool(row.get("is_cancelled")),
+            "cancellation_kind": row.get("cancellation_kind"),
+            "platform": row.get("platform"),
         }
         for row in rows
     ]
@@ -491,6 +501,18 @@ def _live_at():
     for row in rows:
         row["position_source"] = "live" if row.get("lat") is not None else None
     return _live_result(rows, "stop_name")
+
+def _live_delays(rows):
+    """Delay figures for the aggregate stats, cancellations excluded.
+
+    A cancelled train has no delay (NULL, not 0). Folding it in as 0 - which
+    `r["delay_minutes"] or 0` silently did - counts every cancellation as a
+    punctual arrival, so the more trains an operator cancels the better its
+    on-time percentage looks. Cancellations are reported as their own count
+    instead.
+    """
+    return [r["delay_minutes"] for r in rows
+            if not r.get("is_cancelled") and r.get("delay_minutes") is not None]
 
 def _live_pl():
     conn = get_conn()
@@ -681,8 +703,14 @@ def get_live_board(country: str = "HU", limit: int = 300, q: str = ""):
     mapping = _display_map(country)
     route_mapping = _route_display_map(country)
 
-    delays = [r["delay_minutes"] or 0 for r in rows]
+    # Captured before the `q` filter below narrows `rows` - "total" means the
+    # whole feed, which is what the aggregates are documented to describe. It
+    # used to come from len(delays), which was safe only while every row had a
+    # delay figure; cancelled rows don't, so the two counts have parted ways.
+    total_rows = len(rows)
+    delays = _live_delays(rows)
     delayed = sum(1 for d in delays if d > 2)
+    cancelled = [r for r in rows if r.get("is_cancelled")]
     positioned = [r for r in rows if r.get("lat") is not None]
     sources = {}
     for r in positioned:
@@ -699,7 +727,14 @@ def get_live_board(country: str = "HU", limit: int = 300, q: str = ""):
             return False
         rows = [r for r in rows if matches(r)]
 
-    ranked = sorted(rows, key=lambda r: r["delay_minutes"] or 0, reverse=True)
+    # Cancellations sort above every delay: "not running at all" is the most
+    # severe thing that can happen to a train, and a cancelled row's delay is
+    # None, which would otherwise sort it to the bottom with the punctual ones.
+    ranked = sorted(
+        rows,
+        key=lambda r: (1 if r.get("is_cancelled") else 0, r["delay_minutes"] or 0),
+        reverse=True,
+    )
     shown = ranked[:limit] if limit and limit > 0 else ranked
 
     trains = []
@@ -724,13 +759,16 @@ def get_live_board(country: str = "HU", limit: int = 300, q: str = ""):
     return {
         "meta": {
             "country": country,
-            "total": len(delays),
+            "total": total_rows,
             "matched": len(ranked),
             "shown": len(trains),
             "delayed": delayed,
+            # Computed over running trains only - see _live_delays().
             "on_time_pct": round(100.0 * (len(delays) - delayed) / len(delays), 1) if delays else None,
             "avg_delay": round(sum(delays) / len(delays), 1) if delays else None,
             "worst_delay": max(delays) if delays else None,
+            "cancelled": len(cancelled),
+            "cancelled_trips": sum(1 for r in cancelled if r.get("cancellation_kind") == "trip"),
             "with_position": len(positioned),
             "position_sources": sources,
             "attribution": COUNTRY_ATTRIBUTION.get(country),
@@ -766,6 +804,9 @@ def get_live_positions(country: str = "HU"):
             "lat": r["lat"],
             "lon": r["lon"],
             "position_source": r.get("position_source"),
+            "is_cancelled": bool(r.get("is_cancelled")),
+            "cancellation_kind": r.get("cancellation_kind"),
+            "platform": r.get("platform"),
         })
     return out
 
@@ -785,10 +826,20 @@ def get_live_worst(country: str = "HU", kind: str = "route", limit: int = 10):
         raise HTTPException(status_code=400, detail="kind must be 'route' or 'station'")
     key = "route_name" if kind == "route" else "current_stop"
     groups = {}
+    cancels = {}
     for r in get_live(country):
         name = r.get(key)
+        if not name:
+            continue
+        if r.get("is_cancelled"):
+            # Counted, never averaged: a cancellation has no delay to average,
+            # and treating it as 0 would make a route look *better* the more
+            # of its trains stop running.
+            cancels[name] = cancels.get(name, 0) + 1
+            groups.setdefault(name, [])
+            continue
         delay = r.get("delay_minutes")
-        if not name or delay is None:
+        if delay is None:
             continue
         groups.setdefault(name, []).append(delay)
 
@@ -797,16 +848,20 @@ def get_live_worst(country: str = "HU", kind: str = "route", limit: int = 10):
     for name, delays in groups.items():
         entry = {
             "name": name,
-            "train_count": len(delays),
-            "avg_delay": round(sum(delays) / len(delays), 1),
-            "max_delay": round(max(delays), 1),
+            "train_count": len(delays) + cancels.get(name, 0),
+            "avg_delay": round(sum(delays) / len(delays), 1) if delays else None,
+            "max_delay": round(max(delays), 1) if delays else None,
+            "cancelled": cancels.get(name, 0),
         }
         if kind == "station":
             entry["display_name"] = _display_stop(mapping, name, country)
         else:
             entry["display_name"] = _display_route(mapping, name)
         worst.append(entry)
-    worst.sort(key=lambda e: e["avg_delay"], reverse=True)
+    # A group that is only cancellations has no average delay at all; it still
+    # belongs near the top, not sorted as if it were punctual.
+    worst.sort(key=lambda e: (e["cancelled"] > 0, e["avg_delay"] if e["avg_delay"] is not None else 0),
+               reverse=True)
 
     return {
         "meta": {
@@ -836,6 +891,11 @@ def get_live_hu():
         route_name = clean_route_name(trip.get("route", {}).get("longName"), trip.get("tripShortName"))
         stop_name = stop_rel.get("stop", {}).get("name")
         delay_sec = prev.get("arrivalDelay") or prev.get("departureDelay") or 0
+        # See poller.py's parse_vehicles(): OTP models CANCELED but MAV
+        # publishes none today, and a vehiclePositions query can only describe
+        # trains that are running. Read so a real one is surfaced if that
+        # changes; HU is not claimed as having cancellation coverage.
+        is_cancelled = prev.get("realtimeState") == "CANCELED"
         if not route_name or not stop_name:
             continue
 
@@ -866,14 +926,17 @@ def get_live_hu():
             stop_delay_min = round(delay_sec_stop / 60, 1)
             if is_last and stop_delay_min == 0 and (delay_sec or 0) / 60 > 2:
                 stop_delay_min = None
+            stop_cancelled = st.get("realtimeState") == "CANCELED"
             stops.append({
                 "name": name,
                 "dep": _fmt_time(sched),
-                "delay_min": stop_delay_min,
+                "delay_min": None if stop_cancelled else stop_delay_min,
                 # Carried so /train/HU/{id} can draw the journey on a map,
                 # the same way AT's stopovers and PL/DE's stations do.
                 "lat": stop_info.get("lat"),
                 "lon": stop_info.get("lon"),
+                "platform": stop_info.get("platformCode"),
+                "cancelled": stop_cancelled,
             })
             if name == stop_name and stop_idx is None:
                 stop_idx = i
@@ -892,8 +955,11 @@ def get_live_hu():
             # /train/HU/{id} needs.
             "train_id": trip.get("gtfsId"),
             "current_stop": stop_name,
-            "delay_minutes": round(delay_sec / 60, 1),
-            "status": stop_rel.get("status") or "IN_TRANSIT_TO",
+            "delay_minutes": None if is_cancelled else round(delay_sec / 60, 1),
+            "status": "CANCELLED" if is_cancelled else (stop_rel.get("status") or "IN_TRANSIT_TO"),
+            "is_cancelled": is_cancelled,
+            "cancellation_kind": "stop" if is_cancelled else None,
+            "platform": stop_obj.get("platformCode"),
             "stops": stops,
             "stop_idx": stop_idx,
             "lat": lat,
@@ -988,7 +1054,8 @@ def _plausible_delay(delay_min):
     return delay_min
 
 def _journey_stop(name, mapping, country, scheduled=None, expected=None,
-                  delay_min=None, lat=None, lon=None, platform=None):
+                  delay_min=None, lat=None, lon=None, platform=None,
+                  cancelled=False):
     return {
         "name": name,
         "display": _display_stop(mapping, name, country),
@@ -998,6 +1065,10 @@ def _journey_stop(name, mapping, country, scheduled=None, expected=None,
         "lat": lat,
         "lon": lon,
         "platform": platform,
+        # A stop the train will not call at. Distinct from delay_min being
+        # None (which means "no prediction available") - one says the train
+        # isn't stopping, the other says we don't know when it will.
+        "cancelled": cancelled,
     }
 
 def _epoch_to_hhmm(epoch, tz):
@@ -1020,7 +1091,9 @@ def _journey_hu(train_id, mapping):
         stops = [
             _journey_stop(s["name"], mapping, "HU", scheduled=s.get("dep"),
                           delay_min=s.get("delay_min"),
-                          lat=s.get("lat"), lon=s.get("lon"))
+                          lat=s.get("lat"), lon=s.get("lon"),
+                          platform=s.get("platform"),
+                          cancelled=bool(s.get("cancelled")))
             for s in t.get("stops") or []
         ]
         # HU's feed gives a scheduled departure and a per-stop delay but no
@@ -1059,13 +1132,16 @@ def _journey_at(train_id, mapping):
             delay_sec = s.get("departureDelay")
         planned = s.get("plannedArrival") or s.get("plannedDeparture")
         actual = s.get("arrival") or s.get("departure")
+        stop_cancelled = bool(s.get("cancelled"))
         stops.append(_journey_stop(
             s.get("name"), mapping, "AT",
             scheduled=_iso_to_hhmm(planned),
             expected=_iso_to_hhmm(actual) or _iso_to_hhmm(planned),
-            delay_min=round(delay_sec / 60, 1) if delay_sec is not None else None,
+            delay_min=(None if stop_cancelled
+                       else (round(delay_sec / 60, 1) if delay_sec is not None else None)),
             lat=s.get("latitude"), lon=s.get("longitude"),
             platform=s.get("platform"),
+            cancelled=stop_cancelled,
         ))
     loc = trip.get("currentLocation") or {}
     return {
@@ -1120,8 +1196,13 @@ def _journey_pl(train_id, mapping):
         cur.close()
         conn.close()
 
+    trip_cancelled = update.trip.schedule_relationship == gtfs_realtime_pb2.TripDescriptor.CANCELED
     actual_by_seq = {}
+    skipped_seqs = set()
     for stu in update.stop_time_update:
+        if stu.schedule_relationship == gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED:
+            skipped_seqs.add(stu.stop_sequence)
+            continue
         epoch = None
         if stu.HasField("arrival") and stu.arrival.HasField("time"):
             epoch = stu.arrival.time
@@ -1136,8 +1217,9 @@ def _journey_pl(train_id, mapping):
         sched_str = sched_dep or sched_arr
         sched_epoch = _scheduled_epoch(start_date, sched_str) if sched_str else None
         actual_epoch = actual_by_seq.get(seq)
+        stop_cancelled = trip_cancelled or seq in skipped_seqs
         delay = None
-        if sched_epoch and actual_epoch:
+        if sched_epoch and actual_epoch and not stop_cancelled:
             delay = _plausible_delay(round((actual_epoch - sched_epoch) / 60, 1))
         stops.append(_journey_stop(
             name, mapping, "PL",
@@ -1148,6 +1230,7 @@ def _journey_pl(train_id, mapping):
             expected=(_epoch_to_hhmm(actual_epoch, tz) if delay is not None
                       else _epoch_to_hhmm(sched_epoch, tz)),
             delay_min=delay, lat=lat, lon=lon,
+            cancelled=stop_cancelled,
         ))
     return {
         "route_name": meta[0], "train_number": "", "headsign": meta[1],
@@ -1155,6 +1238,8 @@ def _journey_pl(train_id, mapping):
         # Full route: the stop list comes from our own stop_times, so it spans
         # origin to destination even where the feed only predicts part of it.
         "journey_scope": "full",
+        "is_cancelled": trip_cancelled,
+        "cancellation_kind": "trip" if trip_cancelled else ("stop" if skipped_seqs else None),
     }
 
 def _journey_de(train_id, mapping):
@@ -1167,6 +1252,7 @@ def _journey_de(train_id, mapping):
     if update is None:
         return None
     parent_map = load_parent_map()
+    platform_map = load_platform_map()
     tz = ZoneInfo("Europe/Berlin")
     stop_ids = [
         parent_map.get(stu.stop_id, stu.stop_id)
@@ -1192,6 +1278,12 @@ def _journey_de(train_id, mapping):
         cur.close()
         conn.close()
 
+    skipped = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED
+    all_skipped = bool(update.stop_time_update) and all(
+        s.schedule_relationship == skipped for s in update.stop_time_update
+    )
+    any_skipped = any(s.schedule_relationship == skipped for s in update.stop_time_update)
+
     stops = []
     for stu in update.stop_time_update:
         parent = parent_map.get(stu.stop_id, stu.stop_id)
@@ -1201,6 +1293,7 @@ def _journey_de(train_id, mapping):
             # name is left out rather than shown as a blank row.
             continue
         name, lat, lon = row
+        stop_cancelled = stu.schedule_relationship == skipped
         delay_sec = None
         actual = None
         if stu.HasField("arrival"):
@@ -1216,12 +1309,20 @@ def _journey_de(train_id, mapping):
             name, mapping, "DE",
             scheduled=_epoch_to_hhmm(sched_epoch, tz),
             expected=_epoch_to_hhmm(actual, tz),
-            delay_min=round(delay_sec / 60, 1) if delay_sec is not None else None,
+            delay_min=(None if stop_cancelled
+                       else (round(delay_sec / 60, 1) if delay_sec is not None else None)),
             lat=lat, lon=lon,
+            platform=platform_map.get(stu.stop_id),
+            cancelled=stop_cancelled,
         ))
     return {
         "route_name": meta[0], "train_number": "", "headsign": meta[1],
         "train_id": train_id, "stops": stops, "position_source": "estimated",
+        # gtfs.de never sets the trip-level CANCELED flag, so a fully cancelled
+        # train is only recognizable as one whose stops are all skipped - see
+        # germany_poller.parse_de_vehicles().
+        "is_cancelled": all_skipped,
+        "cancellation_kind": "trip" if all_skipped else ("stop" if any_skipped else None),
         # DE is the one country with no stop_times imported, so the journey can
         # only be as complete as the feed itself - and gtfs.de's TripUpdates
         # carry only a trip's *remaining* stops (confirmed: a train near the end

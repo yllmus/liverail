@@ -159,7 +159,13 @@ h2{font-family:var(--font-display);font-weight:800;font-size:26px;margin:0 0 4px
 .sev-late .brow-num,.sev-late .word{color:var(--sev-late)}
 .sev-delayed .brow-num,.sev-delayed .word{color:var(--sev-delayed)}
 .sev-severe .brow-num,.sev-severe .word{color:var(--sev-severe)}
-.sev-cancel .word{color:var(--sev-cancel)}
+.sev-cancel .brow-num,.sev-cancel .word{color:var(--sev-cancel)}
+/* A cancelled row is struck through as well as recolored: the grey reads as
+   "muted/less important" on its own, which is the opposite of the intent. */
+.brow.sev-cancel .brow-route{text-decoration:line-through;text-decoration-thickness:2px;opacity:.75}
+.brow.sev-cancel{background:var(--sev-cancel-bg)}
+.plat-tag{display:inline-block;font:11px var(--font-mono);color:var(--text-dim);border:1px solid var(--line);
+  border-radius:20px;padding:1px 7px;margin-left:8px;white-space:nowrap}
 .pos-chip{font:11px var(--font-mono);color:var(--text-faint);border:1px solid var(--line);border-radius:20px;padding:1px 7px;margin-left:6px}
 
 #map{height:640px;width:100%;background:var(--line-soft);isolation:isolate}
@@ -275,11 +281,13 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 .simple-card.sev-late{border-color:var(--sev-late);background:var(--sev-late-bg)}
 .simple-card.sev-delayed{border-color:var(--sev-delayed);background:var(--sev-delayed-bg)}
 .simple-card.sev-severe{border-color:var(--sev-severe);background:var(--sev-severe-bg)}
+.simple-card.sev-cancel{border-color:var(--sev-cancel);background:var(--sev-cancel-bg)}
 .simple-card .sev-icon{width:56px;height:56px}
 .simple-card.sev-ontime .sev-icon{color:var(--sev-ontime)}
 .simple-card.sev-late .sev-icon{color:var(--sev-late)}
 .simple-card.sev-delayed .sev-icon{color:var(--sev-delayed)}
 .simple-card.sev-severe .sev-icon{color:var(--sev-severe)}
+.simple-card.sev-cancel .sev-icon{color:var(--sev-cancel)}
 .simple-status{font-family:var(--font-display);font-weight:800;font-size:32px;margin-top:10px}
 .simple-sub{font-size:16px;color:var(--text-dim);margin-top:6px}
 .simple-delay{font:800 44px var(--font-mono);margin-top:14px}
@@ -302,10 +310,12 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 .sres .stag-train{color:var(--accent-ink);background:var(--accent);border-radius:4px;padding:2px 5px}
 .sres-meta.sev-ontime{color:var(--sev-ontime)}.sres-meta.sev-late{color:var(--sev-late)}
 .sres-meta.sev-delayed{color:var(--sev-delayed)}.sres-meta.sev-severe{color:var(--sev-severe)}
+.sres-meta.sev-cancel{color:var(--sev-cancel)}
 .track{text-align:left;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:var(--surface)}
 .track-head{padding:26px 26px 22px;text-align:center;border-bottom:1px solid var(--line)}
 .track-head.sev-ontime{background:var(--sev-ontime-bg)}.track-head.sev-late{background:var(--sev-late-bg)}
 .track-head.sev-delayed{background:var(--sev-delayed-bg)}.track-head.sev-severe{background:var(--sev-severe-bg)}
+.track-head.sev-cancel{background:var(--sev-cancel-bg)}
 .track-id{font-family:var(--font-display);font-weight:800;font-size:30px;line-height:1.15}
 .track-sub{font-size:15px;color:var(--text-dim);margin-top:6px}
 .track-status{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:16px;
@@ -313,6 +323,7 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 .track-status .sev-icon{width:28px;height:28px}
 .track-head.sev-ontime .sev-icon{color:var(--sev-ontime)}.track-head.sev-late .sev-icon{color:var(--sev-late)}
 .track-head.sev-delayed .sev-icon{color:var(--sev-delayed)}.track-head.sev-severe .sev-icon{color:var(--sev-severe)}
+.track-head.sev-cancel .sev-icon{color:var(--sev-cancel)}
 .track-delay{font:800 22px var(--font-mono)}
 .track-now{margin-top:10px;font-size:15px}
 .track-plain{margin-top:10px;font-size:15px;color:var(--text)}
@@ -342,6 +353,9 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 .jdelay{font:700 12px var(--font-mono);min-width:56px;text-align:right;white-space:nowrap}
 .jdelay.sev-ontime{color:var(--sev-ontime)}.jdelay.sev-late{color:var(--sev-late)}
 .jdelay.sev-delayed{color:var(--sev-delayed)}.jdelay.sev-severe{color:var(--sev-severe)}
+.jdelay.sev-cancel{color:var(--sev-cancel)}
+.jstop.cancelled .jname{text-decoration:line-through;color:var(--text-dim)}
+.jstop.cancelled .jdot{background:var(--sev-cancel);border-color:var(--sev-cancel)}
 .track-stats{border-top:1px solid var(--line)}
 .track-stat-row{display:flex;gap:14px;flex-wrap:wrap}
 .track-stat{flex:1 1 110px;border:1px solid var(--line);border-radius:10px;padding:12px;text-align:center}
@@ -488,6 +502,7 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
     <div id="attribBox"></div>
     <h3 style="margin-top:22px">Known coverage gaps — not hidden</h3>
     <p class="gapnote">PL and Germany's map positions are schedule-interpolated rather than GPS and only resolve for a minority of trains. Germany's live coverage skews toward DB Regio / S-Bahn service; long-distance ICE/IC visibility is limited. Route labels show a friendly line description next to the operator code where the source feed provides one — Poland's does for every route, Austria's for most. Germany's does not: gtfs.de's feeds carry no route description at all, so German routes show the raw code only (e.g. <code>RE54</code>).</p>
+    <p class="gapnote"><b>Cancellations</b> are shown for Poland and Germany, whose feeds report them. Hungary's and Austria's do not: MÁV's live endpoint only describes trains that are physically running, and ÖBB published none in our sampling — so for those two countries an absence of cancellations means "not reported", not "nothing cancelled". <b>Platform numbers</b> are shown wherever the source provides one, which is uneven by country: Hungary fills roughly 8 in 10, Austria about half, Germany fewer than 1 in 10, and Poland's feed carries no platform data at all.</p>
   </div>
 </footer>
 
@@ -515,17 +530,33 @@ function sevInfo(delay){
   if(delay<=30) return {cls:'sev-delayed',word:'Delayed'};
   return {cls:'sev-severe',word:'Severely delayed'};
 }
-function sevColorVar(cls){return {'sev-ontime':'--sev-ontime','sev-late':'--sev-late','sev-delayed':'--sev-delayed','sev-severe':'--sev-severe'}[cls]||'--text-dim';}
+// Cancellation is its own state, not a very large delay. A cancelled train
+// reports delay_minutes null, so anything reading the delay alone would show
+// it as "Unknown", which is exactly backwards: not running is the single most
+// definite thing we can say about a train. Every renderer that handles a row
+// which could be cancelled must go through here rather than sevInfo directly.
+function sevOf(o){
+  if(o&&(o.is_cancelled||o.cancelled)){
+    return {cls:'sev-cancel',word:o.cancellation_kind==='stop'?'Not stopping here':'Cancelled',cancelled:true};
+  }
+  return sevInfo(o?o.delay_minutes:null);
+}
+function sevColorVar(cls){return {'sev-ontime':'--sev-ontime','sev-late':'--sev-late','sev-delayed':'--sev-delayed','sev-severe':'--sev-severe','sev-cancel':'--sev-cancel'}[cls]||'--text-dim';}
 function cssVar(name){return getComputedStyle(document.documentElement).getPropertyValue(name).trim();}
 var ICONS={
   'sev-ontime':'<circle cx="12" cy="12" r="9.5"/><path d="M8 12.5l2.7 2.7L16.5 9" stroke-linecap="round" stroke-linejoin="round"/>',
   'sev-late':'<circle cx="12" cy="12" r="9.5"/><path d="M12 7v5.3l3.6 2.1" stroke-linecap="round" stroke-linejoin="round"/>',
   'sev-delayed':'<path d="M12 3l9.5 17.5H2.5L12 3z" stroke-linejoin="round"/><path d="M12 10v4.2M12 17.2h.01" stroke-linecap="round"/>',
   'sev-severe':'<circle cx="12" cy="12" r="9.5"/><path d="M12 7v6M12 16.2h.01" stroke-linecap="round"/>',
+  'sev-cancel':'<circle cx="12" cy="12" r="9.5"/><path d="M8.5 8.5l7 7M15.5 8.5l-7 7" stroke-linecap="round"/>',
   '':'<circle cx="12" cy="12" r="9.5" stroke-dasharray="2 3"/>'
 };
 function sevIconSvg(cls){return '<svg class="sev-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">'+(ICONS[cls]||ICONS[''])+'</svg>';}
-function delayLabel(d){if(d==null)return '—';var s=sevInfo(d);return (d<0?'−':'')+Math.abs(Math.round(d))+' min';}
+function delayLabel(d){if(d==null)return '—';return (d<0?'−':'')+Math.abs(Math.round(d))+' min';}
+// The figure shown next to a train's status. A cancelled train has no delay to
+// show, and "—" would read as missing data rather than as the answer.
+function statusFigure(o){return sevOf(o).cancelled?'—':delayLabel(o?o.delay_minutes:null);}
+function platformTag(p){return p?'<span class="plat-tag">Platform '+esc(p)+'</span>':'';}
 // AT/PL/DE route names are raw operator line codes (e.g. "RE54"), not
 // something a rider recognizes. Where routes.long_name gave us a real
 // corridor/operator name (route_display - see api.py's _route_display_map),
@@ -632,6 +663,14 @@ function fmtRetrieved(iso){
   catch(e){return iso;}
 }
 
+/* Which feeds actually report cancellations, verified against each live source
+   on 2026-08-21 rather than assumed: PL flags whole trips CANCELED and marks
+   individual stops SKIPPED; DE never sets the trip flag but marks stops
+   SKIPPED (all of them, for a cancelled train). HU's live endpoint only
+   describes trains that are running, and OBB's HAFAS published none, so for
+   those two "no cancellations shown" means "not reported", not "none". */
+var CANCEL_COUNTRIES={PL:true,DE:true};
+
 /* ---------- stats strip ---------- */
 function renderStats(meta){
   var strip=document.getElementById('statsStrip');
@@ -641,8 +680,14 @@ function renderStats(meta){
     {num:meta.on_time_pct!=null?meta.on_time_pct+'%':'—',lbl:'On time'},
     {num:meta.avg_delay!=null?meta.avg_delay+' m':'—',lbl:'Avg delay'},
     {num:meta.worst_delay!=null?Math.round(meta.worst_delay)+' m':'—',lbl:'Worst delay'},
+    // Only shown where the feed can actually report cancellations. HU and AT
+    // publish none (see the footer note), and a permanent "0 Cancelled" tile
+    // there would assert that nothing is cancelled rather than that we cannot
+    // tell, which this data does not support.
+    (meta.cancelled!=null&&(meta.cancelled>0||CANCEL_COUNTRIES[state.country]))
+      ? {num:meta.cancelled,lbl:'Cancelled'} : null,
     {num:meta.with_position,lbl:'With position'}
-  ];
+  ].filter(Boolean);
   strip.innerHTML=tiles.map(function(t,i){
     return '<div class="stat-tile'+(i===0?' live-updating':'')+'"><div class="num">'+esc(t.num)+'</div><div class="lbl">'+t.lbl+'</div></div>';
   }).join('');
@@ -666,12 +711,15 @@ function renderBoard(data){
   document.getElementById('boardCount').textContent=data.meta.shown+' of '+data.meta.matched+(data.meta.matched!==data.meta.total?(' / '+data.meta.total):'');
   if(!data.trains.length){el.innerHTML='<div class="empty-msg">No trains match right now. Scheduled service may have resumed by the next refresh.</div>';return;}
   el.innerHTML=data.trains.map(function(t){
-    var sev=sevInfo(t.delay_minutes);
-    var sub=(t.headsign?('→ '+esc(t.headsign)+' · '):'')+'Now at '+esc(t.current_stop_display||t.current_stop||'—');
+    var sev=sevOf(t);
+    var where=sev.cancelled&&t.cancellation_kind!=='stop'
+      ? 'Due from '+esc(t.current_stop_display||t.current_stop||'—')
+      : 'Now at '+esc(t.current_stop_display||t.current_stop||'—');
+    var sub=(t.headsign?('→ '+esc(t.headsign)+' · '):'')+where+platformTag(t.platform);
     return '<div class="brow '+sev.cls+'" data-train=\''+esc(JSON.stringify(t))+'\'>'+
       sevIconSvg(sev.cls)+
       '<div class="brow-main"><div class="brow-route">'+(t.route_name?routeLabel(t.route_name,t.route_display):esc(t.train_number||'—'))+'</div><div class="brow-sub">'+sub+'</div></div>'+
-      '<div style="text-align:right"><div class="brow-status"><span class="word">'+sev.word+'</span></div><div class="brow-num">'+delayLabel(t.delay_minutes)+'</div></div>'+
+      '<div style="text-align:right"><div class="brow-status"><span class="word">'+sev.word+'</span></div><div class="brow-num">'+statusFigure(t)+'</div></div>'+
       '</div>';
   }).join('');
   Array.prototype.forEach.call(el.querySelectorAll('.brow'),function(row){
@@ -709,14 +757,14 @@ function renderPositions(rows){
   document.getElementById('mapCount').textContent=rows.length+' positioned';
   state.markerLayer.clearLayers();
   rows.forEach(function(r){
-    var sev=sevInfo(r.delay_minutes);
+    var sev=sevOf(r);
     var color=cssVar(sevColorVar(sev.cls))||'#1d4e89';
     var m=L.circleMarker([r.lat,r.lon],{
       radius:6,color:color,weight:2,fillColor:color,fillOpacity:0.85
     });
     var popup='<div class="popup-route">'+esc(r.route_name||r.train_number||'—')+'</div>'+
-      '<div class="popup-sub">'+(r.headsign?('→ '+esc(r.headsign)+' · '):'')+'Now at '+esc(r.current_stop_display||r.current_stop||'—')+'</div>'+
-      '<div class="popup-status" style="color:'+color+'">'+sev.word+' · '+delayLabel(r.delay_minutes)+'</div>'+
+      '<div class="popup-sub">'+(r.headsign?('→ '+esc(r.headsign)+' · '):'')+'Now at '+esc(r.current_stop_display||r.current_stop||'—')+(r.platform?(' · Platform '+esc(r.platform)):'')+'</div>'+
+      '<div class="popup-status" style="color:'+color+'">'+sev.word+(sev.cancelled?'':(' · '+delayLabel(r.delay_minutes)))+'</div>'+
       (r.route_name?('<a href="#" class="popup-link" data-route="'+esc(r.route_name)+'">View route history →</a>'):'');
     m.bindPopup(popup);
     m.on('popupopen',function(e){
@@ -759,19 +807,22 @@ function loadLiveWorst(){
 }
 function renderWorstTable(id,kind,rows){
   var tbl=document.getElementById(id+'Tbl');
-  tbl.querySelector('thead').innerHTML='<tr><th>'+(kind==='station'?'Station':'Route')+'</th><th>Trains</th><th>Avg delay</th><th>Worst</th></tr>';
+  tbl.querySelector('thead').innerHTML='<tr><th>'+(kind==='station'?'Station':'Route')+'</th><th>Trains</th><th>Avg delay</th><th>Worst</th><th>Cancelled</th></tr>';
   if(!rows.length){
-    tbl.querySelector('tbody').innerHTML='<tr><td colspan="4" class="rank-loading">Nothing currently delayed.</td></tr>';
+    tbl.querySelector('tbody').innerHTML='<tr><td colspan="5" class="rank-loading">Nothing currently delayed.</td></tr>';
     return;
   }
   tbl.querySelector('tbody').innerHTML=rows.map(function(r){
     var label=kind==='station'?esc(r.display_name||r.name):routeLabel(r.name,r.display_name);
-    var sev=sevInfo(r.avg_delay);
+    // A group made up entirely of cancellations has no average delay at all;
+    // it is not "0 min", it is "there is nothing running to measure".
+    var sev=r.avg_delay==null?{cls:'sev-cancel'}:sevInfo(r.avg_delay);
     return '<tr class="clickable" data-name="'+esc(r.name)+'">'+
       '<td>'+label+'</td>'+
       '<td class="num">'+r.train_count+'</td>'+
       '<td class="num" style="color:var('+sevColorVar(sev.cls)+')">'+delayLabel(r.avg_delay)+'</td>'+
       '<td class="num">'+delayLabel(r.max_delay)+'</td>'+
+      '<td class="num"'+(r.cancelled?' style="color:var(--sev-cancel);font-weight:700"':'')+'>'+(r.cancelled||'—')+'</td>'+
       '</tr>';
   }).join('');
   Array.prototype.forEach.call(tbl.querySelectorAll('tr[data-name]'),function(tr){
@@ -887,7 +938,12 @@ Array.prototype.forEach.call(document.querySelectorAll('[data-view-link]'),funct
     if(btn)btn.click();
   });
 });
-function simplePlainMessage(delay){
+function simplePlainMessage(delay,o){
+  if(o&&(o.is_cancelled||o.cancelled)){
+    return o.cancellation_kind==='stop'
+      ? 'This train is running but will not stop here. You will need another train from this station.'
+      : 'This train has been cancelled and will not run. You will need to find another train.';
+  }
   if(delay==null)return 'No current delay information for this train.';
   if(delay<=2)return 'Right on schedule — no need to rush.';
   if(delay<=10)return 'A short delay. You likely still have plenty of time.';
@@ -916,8 +972,8 @@ function wireTrainSearch(inputId,popId){
       var tag=r.type==='train'?'Train':(r.type==='station'?'Station':'Route');
       var meta='';
       if(r.type==='train'){
-        var sev=sevInfo(r.train.delay_minutes);
-        meta='<span class="sres-meta '+sev.cls+'">'+delayLabel(r.train.delay_minutes)+'</span>';
+        var sev=sevOf(r.train);
+        meta='<span class="sres-meta '+sev.cls+'">'+(sev.cancelled?esc(sev.word):delayLabel(r.train.delay_minutes))+'</span>';
       }
       return '<div class="sres" data-i="'+i+'"><span class="stag stag-'+r.type+'">'+tag+'</span>'+
              '<span class="sname">'+esc(r.label)+'</span>'+
@@ -989,7 +1045,7 @@ function showTrain(t){
   }).catch(function(){renderSimpleLive(trainLabel(t),t);});
 }
 function renderTrain(d){
-  var sev=sevInfo(d.delay_minutes);
+  var sev=sevOf(d);
   var title=d.train_number||d.route_name||'Train';
   var sub=[];
   if(d.route_name&&d.route_name!==title)sub.push(d.route_name);
@@ -1010,9 +1066,9 @@ function renderTrain(d){
       '<div class="track-id">'+esc(title)+'</div>'+
       '<div class="track-sub">'+esc(sub.join(' · '))+'</div>'+
       '<div class="track-status">'+sevIconSvg(sev.cls)+'<span>'+esc(sev.word)+'</span>'+
-        '<span class="track-delay">'+delayLabel(d.delay_minutes)+'</span></div>'+
-      (d.current_stop?'<div class="track-now">Now at <b>'+esc(d.current_stop)+'</b></div>':'')+
-      '<div class="track-plain">'+simplePlainMessage(d.delay_minutes)+'</div>'+
+        (sev.cancelled?'':'<span class="track-delay">'+delayLabel(d.delay_minutes)+'</span>')+'</div>'+
+      (d.current_stop?'<div class="track-now">Now at <b>'+esc(d.current_stop)+'</b>'+platformTag(d.platform)+'</div>':'')+
+      '<div class="track-plain">'+simplePlainMessage(d.delay_minutes,d)+'</div>'+
     '</div>'+
     (mappable.length?'<div class="track-map" id="trackMap"></div>':'')+
     renderJourney(d)+
@@ -1031,15 +1087,18 @@ function renderJourney(d){
     ? '<div class="track-scope">Germany’s live feed publishes only a train’s <b>remaining</b> stops, so earlier ones aren’t listed.</div>'
     : '';
   var rows=stops.map(function(s){
-    var ssev=sevInfo(s.delay_min);
-    var cls='jstop'+(s.passed?' passed':'')+(s.current?' current':'');
-    var times='<span class="jsched'+(s.delay_min>2?' struck':'')+'">'+esc(s.scheduled||'—')+'</span>';
-    if(s.delay_min!=null&&s.delay_min>2&&s.expected)times+='<span class="jexp '+ssev.cls+'">'+esc(s.expected)+'</span>';
+    var ssev=sevOf(s);
+    var cls='jstop'+(s.passed?' passed':'')+(s.current?' current':'')+(ssev.cancelled?' cancelled':'');
+    // A cancelled stop's scheduled time is struck through too - it is not
+    // happening, so presenting it as a live time would be wrong.
+    var times='<span class="jsched'+((s.delay_min>2||ssev.cancelled)?' struck':'')+'">'+esc(s.scheduled||'—')+'</span>';
+    if(!ssev.cancelled&&s.delay_min!=null&&s.delay_min>2&&s.expected)times+='<span class="jexp '+ssev.cls+'">'+esc(s.expected)+'</span>';
+    var right=ssev.cancelled?'no stop':(s.delay_min==null?'':(s.delay_min>2?'+'+Math.round(s.delay_min):'on time'));
     return '<li class="'+cls+'">'+
       '<span class="jdot"></span>'+
       '<span class="jname">'+esc(s.display||s.name)+(s.platform?'<span class="jplat">pl. '+esc(s.platform)+'</span>':'')+'</span>'+
       '<span class="jtimes">'+times+'</span>'+
-      '<span class="jdelay '+ssev.cls+'">'+(s.delay_min==null?'':(s.delay_min>2?'+'+Math.round(s.delay_min):'on time'))+'</span>'+
+      '<span class="jdelay '+ssev.cls+'">'+right+'</span>'+
     '</li>';
   }).join('');
   return '<div class="track-journey"><h3>Every stop'+(d.journey_scope==='remaining'?' still to come':'')+'</h3>'+
@@ -1111,11 +1170,11 @@ function showRouteTrains(name,label){
 function renderTrainList(label,trains,what,fallback){
   if(!trains.length){fallback();return;}
   var rows=trains.slice(0,15).map(function(t,i){
-    var sev=sevInfo(t.delay_minutes);
+    var sev=sevOf(t);
     return '<li class="dep-row" data-i="'+i+'">'+
       '<span class="dep-id">'+esc(trainLabel(t))+'</span>'+
       '<span class="dep-to">'+esc(t.headsign?('→ '+t.headsign):(t.current_stop_display||t.current_stop||''))+'</span>'+
-      '<span class="dep-delay '+sev.cls+'">'+esc(sev.word)+' · '+delayLabel(t.delay_minutes)+'</span>'+
+      '<span class="dep-delay '+sev.cls+'">'+esc(sev.word)+(sev.cancelled?'':(' · '+delayLabel(t.delay_minutes)))+'</span>'+
     '</li>';
   }).join('');
   simpleResultEl().innerHTML='<div class="track"><div class="track-head">'+
@@ -1138,13 +1197,13 @@ function showRouteHistory(name,label){
 }
 
 function renderSimpleLive(label,t,note){
-  var sev=sevInfo(t.delay_minutes);
+  var sev=sevOf(t);
   var html='<div class="simple-card '+sev.cls+'">'+
     sevIconSvg(sev.cls)+
     '<div class="simple-status">'+esc(sev.word)+'</div>'+
-    '<div class="simple-sub">'+esc(label)+(t.headsign?(' → '+esc(t.headsign)):'')+' · now at '+esc(t.current_stop_display||t.current_stop||'—')+'</div>'+
-    '<div class="simple-delay">'+delayLabel(t.delay_minutes)+'</div>'+
-    '<div class="simple-plain">'+simplePlainMessage(t.delay_minutes)+'</div>'+
+    '<div class="simple-sub">'+esc(label)+(t.headsign?(' → '+esc(t.headsign)):'')+' · now at '+esc(t.current_stop_display||t.current_stop||'—')+(t.platform?(' · platform '+esc(t.platform)):'')+'</div>'+
+    (sev.cancelled?'':'<div class="simple-delay">'+delayLabel(t.delay_minutes)+'</div>')+
+    '<div class="simple-plain">'+simplePlainMessage(t.delay_minutes,t)+'</div>'+
     // Only reached when the stop-by-stop lookup failed but we still have the
     // train from the live board - say why the timetable is missing rather
     // than silently showing less.
@@ -1267,21 +1326,24 @@ function openDetail(kind,name){
 function openTrainDrawer(t){
   var backdrop=document.getElementById('backdrop'),drawer=document.getElementById('drawer');
   backdrop.classList.add('open');drawer.classList.add('open');
-  var sev=sevInfo(t.delay_minutes);
+  var sev=sevOf(t);
   document.getElementById('drawerTitle').textContent=t.route_name||t.train_number||'Train';
   document.getElementById('drawerSub').textContent=(t.train_number?('#'+t.train_number+' · '):'')+state.country+' · live snapshot';
   var body=document.getElementById('drawerBody');
   var html='<div class="dstat-grid">'+
-    '<div class="dstat"><div class="num" style="color:var('+sevColorVar(sev.cls)+')">'+delayLabel(t.delay_minutes)+'</div><div class="lbl">'+sev.word+'</div></div>'+
+    '<div class="dstat"><div class="num" style="color:var('+sevColorVar(sev.cls)+')">'+statusFigure(t)+'</div><div class="lbl">'+esc(sev.word)+'</div></div>'+
     '<div class="dstat"><div class="num">'+esc(t.current_stop_display||t.current_stop||'—')+'</div><div class="lbl">Now at</div></div>'+
-    '<div class="dstat"><div class="num">'+(t.position_source?'Known':'None')+'</div><div class="lbl">Position</div></div>'+
+    '<div class="dstat"><div class="num">'+(t.platform?esc(t.platform):(t.position_source?'Known':'None'))+'</div><div class="lbl">'+(t.platform?'Platform':'Position')+'</div></div>'+
     '</div>';
+  if(sev.cancelled)html+='<p class="mini-tbl-note" style="color:var(--sev-cancel)"><b>'+simplePlainMessage(null,t)+'</b></p>';
   if(t.headsign)html+='<p style="font-size:14px;color:var(--text-dim)">Heading to <b style="color:var(--text)">'+esc(t.headsign)+'</b></p>';
   if(t.stops&&t.stops.length){
     html+='<div class="dsec"><h4>Scheduled stops (today)</h4><div class="tbl-wrap"><table class="dep"><thead><tr><th>Stop</th><th>Dep.</th><th>Delay</th></tr></thead><tbody>'+
       t.stops.map(function(s,i){
         var cur=i===t.stop_idx;
-        return '<tr style="'+(cur?'background:var(--accent-soft)':'')+'"><td>'+esc(s.display||s.name)+(cur?' <span style="color:var(--accent);font-size:11px">● now</span>':'')+'</td><td class="num">'+(s.dep||'—')+'</td><td class="num">'+(s.delay_min!=null?fmtNum(s.delay_min,1)+'m':'—')+'</td></tr>';
+        var nm=esc(s.display||s.name);
+        if(s.cancelled)nm='<s style="color:var(--text-dim)">'+nm+'</s>';
+        return '<tr style="'+(cur?'background:var(--accent-soft)':'')+'"><td>'+nm+(cur?' <span style="color:var(--accent);font-size:11px">● now</span>':'')+'</td><td class="num">'+(s.dep||'—')+'</td><td class="num">'+(s.cancelled?'<span style="color:var(--sev-cancel)">no stop</span>':(s.delay_min!=null?fmtNum(s.delay_min,1)+'m':'—'))+'</td></tr>';
       }).join('')+'</tbody></table></div></div>';
   }else{
     html+='<p class="mini-tbl-note">No per-train history is persisted for this country yet — this is a live snapshot only. See the route\'s own history below.</p>';

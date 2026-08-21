@@ -7,12 +7,21 @@
         "trip": {
           "gtfsId": "HU:1:1234",
           "tripHeadsign": "Szeged",
-          "route": { "longName": "Budapest - Szeged" }
+          "route": {
+            "longName": "Budapest - Szeged"
+          }
         },
         "stopRelationship": {
-          "stop": { "gtfsId": "HU:1:5678", "name": "Kecskemet" }
+          "stop": {
+            "gtfsId": "HU:1:5678",
+            "name": "Kecskemet",
+            "platformCode": "3"
+          }
         },
-        "prevOrCurrentStop": { "arrivalDelay": 300, "departureDelay": 240 }
+        "prevOrCurrentStop": {
+          "arrivalDelay": 300,
+          "departureDelay": 240
+        }
       },
       {
         "lat": 47.1621,
@@ -20,20 +29,33 @@
         "trip": {
           "gtfsId": "HU:1:9999",
           "tripHeadsign": "Debrecen",
-          "route": { "longName": "Budapest - Debrecen" }
+          "route": {
+            "longName": "Budapest - Debrecen"
+          }
         },
         "stopRelationship": {
-          "stop": { "gtfsId": "HU:1:1111", "name": "Szolnok" }
+          "stop": {
+            "gtfsId": "HU:1:1111",
+            "name": "Szolnok",
+            "platformCode": null
+          }
         },
-        "prevOrCurrentStop": { "arrivalDelay": null, "departureDelay": 60 }
+        "prevOrCurrentStop": {
+          "arrivalDelay": null,
+          "departureDelay": 60
+        }
       },
       {
         "trip": {
           "gtfsId": "HU:1:0000",
-          "route": { "longName": "Missing stop data" }
+          "route": {
+            "longName": "Missing stop data"
+          }
         },
         "stopRelationship": null,
-        "prevOrCurrentStop": { "arrivalDelay": 120 }
+        "prevOrCurrentStop": {
+          "arrivalDelay": 120
+        }
       },
       {
         "lat": 46.253,
@@ -42,12 +64,21 @@
           "gtfsId": "HU:1:36441",
           "tripShortName": "36441 személyvonat",
           "tripHeadsign": "Kiskunfélegyháza",
-          "route": { "longName": "Sz 36410/36412/36413/36415/36423/36424/36432/36437/36438/36441/36443" }
+          "route": {
+            "longName": "Sz 36410/36412/36413/36415/36423/36424/36432/36437/36438/36441/36443"
+          }
         },
         "stopRelationship": {
-          "stop": { "gtfsId": "HU:1:2222", "name": "Kiskunfelegyhaza" }
+          "stop": {
+            "gtfsId": "HU:1:2222",
+            "name": "Kiskunfelegyhaza",
+            "platformCode": "1"
+          }
         },
-        "prevOrCurrentStop": { "arrivalDelay": 60, "departureDelay": 60 }
+        "prevOrCurrentStop": {
+          "arrivalDelay": 60,
+          "departureDelay": 60
+        }
       }
     ]
   }
