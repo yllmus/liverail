@@ -166,6 +166,22 @@ h2{font-family:var(--font-display);font-weight:800;font-size:26px;margin:0 0 4px
 .brow.sev-cancel{background:var(--sev-cancel-bg)}
 .plat-tag{display:inline-block;font:11px var(--font-mono);color:var(--text-dim);border:1px solid var(--line);
   border-radius:20px;padding:1px 7px;margin-left:8px;white-space:nowrap}
+.csv-link{margin-left:auto;font:11px var(--font-mono);color:var(--text-dim);text-decoration:none;
+  border:1px solid var(--line);border-radius:20px;padding:3px 10px;white-space:nowrap}
+.csv-link:hover{color:var(--accent);border-color:var(--accent)}
+/* One train's own record, under its live journey. */
+.hist-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;margin:10px 0 14px}
+.hist-stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:11px 13px}
+.hist-stat b{display:block;font:800 20px var(--font-mono)}
+.hist-stat span{display:block;margin-top:2px;font:11px var(--font-mono);color:var(--text-dim);
+  text-transform:uppercase;letter-spacing:.06em}
+.dowbar{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:6px}
+.dowcell{text-align:center;border:1px solid var(--line);border-radius:var(--radius);padding:8px 2px;background:var(--surface)}
+.dowcell .d{font:11px var(--font-mono);color:var(--text-dim)}
+.dowcell .v{font:800 15px var(--font-mono);margin-top:3px}
+.dowcell.empty .v{color:var(--text-faint)}
+.hist-warn{font:12px var(--font-mono);color:var(--sev-late);background:var(--sev-late-bg);
+  border:1px solid var(--sev-late);border-radius:var(--radius);padding:8px 11px;margin-bottom:10px}
 .pos-chip{font:11px var(--font-mono);color:var(--text-faint);border:1px solid var(--line);border-radius:20px;padding:1px 7px;margin-left:6px}
 
 #map{height:640px;width:100%;background:var(--line-soft);isolation:isolate}
@@ -457,14 +473,22 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
         <div class="tbl-wrap" style="border-radius:0 0 var(--radius) var(--radius);border-top:none"><table class="dep" id="worstRouteTbl"><thead></thead><tbody></tbody></table></div>
       </div>
     </div>
+    <h2 style="margin-top:32px">By operator</h2>
+    <p class="h2-note">Which train companies actually run on time. <span id="opNote"></span></p>
+    <div class="panel-head" style="border:1px solid var(--line);border-bottom:none;border-radius:var(--radius) var(--radius) 0 0">
+      <h3>Operators</h3><span class="cnt" id="opCount"></span>
+      <a class="csv-link" id="opCsv" href="#" download>Download CSV</a>
+    </div>
+    <div class="tbl-wrap" style="border-radius:0 0 var(--radius) var(--radius);border-top:none"><table class="dep" id="opTbl"><thead></thead><tbody></tbody></table></div>
+
     <h2 style="margin-top:32px">Historical reliability</h2>
     <div class="rank-grid">
       <div>
-        <div class="panel-head" style="border:1px solid var(--line);border-bottom:none;border-radius:var(--radius) var(--radius) 0 0"><h3>Stations</h3><span class="cnt" id="stationRankCount"></span></div>
+        <div class="panel-head" style="border:1px solid var(--line);border-bottom:none;border-radius:var(--radius) var(--radius) 0 0"><h3>Stations</h3><span class="cnt" id="stationRankCount"></span><a class="csv-link" id="stationCsv" href="#" download>CSV</a></div>
         <div class="tbl-wrap" style="border-radius:0 0 var(--radius) var(--radius);border-top:none"><table class="dep" id="stationRankTbl"><thead></thead><tbody></tbody></table></div>
       </div>
       <div>
-        <div class="panel-head" style="border:1px solid var(--line);border-bottom:none;border-radius:var(--radius) var(--radius) 0 0"><h3>Routes</h3><span class="cnt" id="routeRankCount"></span></div>
+        <div class="panel-head" style="border:1px solid var(--line);border-bottom:none;border-radius:var(--radius) var(--radius) 0 0"><h3>Routes</h3><span class="cnt" id="routeRankCount"></span><a class="csv-link" id="routeCsv" href="#" download>CSV</a></div>
         <div class="tbl-wrap" style="border-radius:0 0 var(--radius) var(--radius);border-top:none"><table class="dep" id="routeRankTbl"><thead></thead><tbody></tbody></table></div>
       </div>
     </div>
@@ -829,9 +853,52 @@ function renderWorstTable(id,kind,rows){
     tr.addEventListener('click',function(){openDetail(kind,tr.getAttribute('data-name'));});
   });
 }
+function loadOperators(){
+  var forCountry=state.country;
+  var tbl=document.getElementById('opTbl');
+  document.getElementById('opCount').textContent='';
+  document.getElementById('opNote').textContent='';
+  tbl.innerHTML='<thead></thead><tbody><tr><td class="rank-loading"><span class="spinner"></span>Loading operators…</td></tr></tbody>';
+  api('/operators/summary',{country:forCountry}).then(function(res){
+    if(state.country!==forCountry)return;
+    document.getElementById('opCount').textContent=res.operators.length+' operators';
+    // An empty table always explains itself - for PL and AT the gap is in the
+    // source data and permanent, which is a different thing from "no data yet".
+    if(res.meta.note)document.getElementById('opNote').textContent=res.meta.note;
+    if(!res.operators.length){
+      tbl.innerHTML='<thead></thead><tbody><tr><td class="rank-loading">'+esc(res.meta.note||'No operator data for this country.')+'</td></tr></tbody>';
+      return;
+    }
+    tbl.querySelector('thead').innerHTML='<tr><th>Operator</th><th>On time</th><th>Avg delay</th><th>Routes</th><th>Observations</th><th>Cancelled</th></tr>';
+    tbl.querySelector('tbody').innerHTML=res.operators.map(function(o){
+      var sev=sevInfo(o.avg_delay);
+      return '<tr>'+
+        '<td>'+esc(o.operator)+'</td>'+
+        '<td class="num">'+fmtNum(o.pct_on_time,1)+'%</td>'+
+        '<td class="num" style="color:var('+sevColorVar(sev.cls)+')">'+fmtNum(o.avg_delay,1)+' m</td>'+
+        '<td class="num">'+o.routes+'</td>'+
+        '<td class="num">'+Number(o.total).toLocaleString()+'</td>'+
+        '<td class="num">'+(o.cancellations||'—')+'</td>'+
+        '</tr>';
+    }).join('');
+  }).catch(function(){
+    if(state.country===forCountry)tbl.innerHTML='<thead></thead><tbody><tr><td class="error-msg">Couldn’t load. <a href="#" onclick="loadOperators();return false">Try again</a></td></tr></tbody>';
+  });
+}
+function refreshCsvLinks(){
+  // Exports come from the same endpoints the tables render, with format=csv -
+  // never a second query path that could disagree with what is on screen.
+  var c=encodeURIComponent(state.country);
+  var set=function(id,path){var a=document.getElementById(id);if(a)a.href=API+path+'?country='+c+'&format=csv';};
+  set('opCsv','/operators/summary');
+  set('stationCsv','/stations/summary');
+  set('routeCsv','/routes/summary');
+}
 function loadRankings(){
   var forCountry=state.country;
   loadLiveWorst();
+  loadOperators();
+  refreshCsvLinks();
   rankLoading('station','stations');rankLoading('route','routes');
   api('/stations/summary',{country:forCountry}).then(function(rows){
     // A country switch mid-request must not paint the old country's numbers.
@@ -1072,13 +1139,90 @@ function renderTrain(d){
     '</div>'+
     (mappable.length?'<div class="track-map" id="trackMap"></div>':'')+
     renderJourney(d)+
+    '<div class="track-stats" id="trainHistory"></div>'+
     renderRouteStats(d)+
     simpleActionsHtml()+
   '</div>';
   simpleResultEl().innerHTML=html;
   if(mappable.length)drawTrainMap(d,mappable);
+  loadTrainHistory(d);
   loadSimpleActions(state.country,'affiliate_booking');
   if(d.delay_minutes!=null&&d.delay_minutes>0)checkSimpleCompensation(d.delay_minutes);
+}
+// Monday-first, because the history query groups by ISODOW (1=Mon). Named
+// distinctly from the heatmap's own DOW below, which is Sunday-first to match
+// Postgres's EXTRACT(DOW) - two `var DOW` declarations in one scope silently
+// collided and mislabelled every weekday on this panel.
+var ISO_DOW=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+function loadTrainHistory(d){
+  var el=document.getElementById('trainHistory');
+  if(!el||!d.train_id)return;
+  var forCountry=state.country;
+  el.innerHTML='<h3>How this train usually runs</h3><div class="rank-loading"><span class="spinner"></span>Checking its past runs…</div>';
+  api('/train/'+forCountry+'/'+encodeURIComponent(d.train_id)+'/history',{days:30}).then(function(h){
+    if(state.country!==forCountry)return;
+    renderTrainHistory(el,h);
+  }).catch(function(){el.innerHTML='';});
+}
+function renderTrainHistory(el,h){
+  var s=h.summary||{};
+  if(!h.has_history){
+    // Say why there is nothing rather than rendering an empty panel. For HU
+    // and AT the honest answer is that per-train identity only started being
+    // recorded very recently, not that this train has never run.
+    el.innerHTML='<h3>How this train usually runs</h3>'+
+      '<div class="track-stat-note">No past runs recorded for this train yet. '+
+      (h.identity_basis?'':'We could not match it to a train we have tracked before. ')+
+      'Per-train records are newest in Hungary and Austria, where they only began on 20 August 2026.</div>';
+    return;
+  }
+  var days=s.days_seen||0;
+  var html='<h3>How this train usually runs</h3>';
+  if(h.mixed_identity){
+    html+='<div class="hist-warn">This train’s identifier has been reused for more than one route, so the figures below may mix two different trains. Treat them as approximate.</div>';
+  }
+  html+='<div class="hist-grid">'+
+    '<div class="hist-stat"><b>'+(s.pct_on_time!=null?fmtNum(s.pct_on_time,0)+'%':'—')+'</b><span>on time</span></div>'+
+    '<div class="hist-stat"><b>'+(s.avg_delay!=null?fmtNum(s.avg_delay,1)+' m':'—')+'</b><span>avg delay</span></div>'+
+    '<div class="hist-stat"><b>'+(s.worst_delay!=null?Math.round(s.worst_delay)+' m':'—')+'</b><span>worst</span></div>'+
+    '<div class="hist-stat"><b>'+days+'</b><span>days seen</span></div>'+
+    (s.cancellations?'<div class="hist-stat"><b style="color:var(--sev-cancel)">'+s.cancellations+'</b><span>cancelled</span></div>':'')+
+  '</div>';
+
+  // Weekday breakdown - the "is it always late on Fridays" question, which is
+  // the whole point of per-train history rather than per-route.
+  var byDow={};(h.by_dow||[]).forEach(function(r){byDow[r.dow]=r;});
+  html+='<div style="font:11px var(--font-mono);color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em">Average delay by weekday</div><div class="dowbar">';
+  for(var i=1;i<=7;i++){
+    var r=byDow[i];
+    var has=r&&r.avg_delay!=null;
+    var sev=has?sevInfo(r.avg_delay):{cls:''};
+    html+='<div class="dowcell'+(has?'':' empty')+'"><div class="d">'+ISO_DOW[i-1]+'</div>'+
+      '<div class="v"'+(has?' style="color:var('+sevColorVar(sev.cls)+')"':'')+'>'+(has?fmtNum(r.avg_delay,0):'—')+'</div></div>';
+  }
+  html+='</div>';
+
+  var runs=(h.runs||[]).slice(0,10);
+  if(runs.length){
+    html+='<div class="tbl-wrap" style="margin-top:14px"><table class="dep"><thead><tr><th>Day</th><th>On time</th><th>Avg</th><th>Worst</th><th>Cancelled</th></tr></thead><tbody>'+
+      runs.map(function(r){
+        var sev=r.avg_delay!=null?sevInfo(r.avg_delay):{cls:''};
+        return '<tr><td>'+esc(r.day)+'</td>'+
+          '<td class="num">'+(r.pct_on_time!=null?fmtNum(r.pct_on_time,0)+'%':'—')+'</td>'+
+          '<td class="num" style="color:var('+sevColorVar(sev.cls)+')">'+(r.avg_delay!=null?fmtNum(r.avg_delay,1):'—')+'</td>'+
+          '<td class="num">'+(r.worst_delay!=null?Math.round(r.worst_delay):'—')+'</td>'+
+          '<td class="num"'+(r.cancellations?' style="color:var(--sev-cancel);font-weight:700"':'')+'>'+(r.cancellations||'—')+'</td></tr>';
+      }).join('')+'</tbody></table></div>';
+  }
+  // A train whose only record is cancellations has no observations to average,
+  // and "based on 0 observations" reads as broken rather than as the answer.
+  var basis=(s.observations
+    ? 'Based on '+Number(s.observations).toLocaleString()+' recorded observations of this train'
+    : 'We have no on-time records for this train — only '+(s.cancellations||0)+' cancellation'+((s.cancellations===1)?'':'s'));
+  html+='<div class="track-stat-note">'+basis+(s.first_seen?' since '+esc(s.first_seen):'')+'.'+
+    (h.identity_basis==='live_trip_id'?' Matched by the operator’s live identifier, which is only reliable within a single route.':'')+
+    '</div>';
+  el.innerHTML=html;
 }
 function renderJourney(d){
   var stops=d.stops||[];
@@ -1155,6 +1299,9 @@ function showStationDepartures(name,label){
     });
     renderTrainList(label,trains,'trains at or heading through this station right now',
       function(){showStationHistory(name,label);});
+    // Only when something is live did renderTrainList win; the fallback path
+    // loads the board itself (via showStationHistory) so it isn't loaded twice.
+    if(trains.length)loadStationBoard(name,label);
   }).catch(renderSimpleError);
 }
 function showRouteTrains(name,label){
@@ -1188,7 +1335,52 @@ function renderTrainList(label,trains,what,fallback){
 function showStationHistory(name,label){
   api('/station/'+encodeURIComponent(name)+'/stats',{country:state.country}).then(function(d){
     renderSimpleHistoric(label,d,'Nothing running here right now — here’s how it usually runs.');
+    loadStationBoard(name,label);
   }).catch(renderSimpleError);
+}
+/* What actually called here today (or on a chosen day). The live board can
+   only answer "what is here now", which is empty at night and unhelpful to
+   someone checking whether their train ran at all. */
+function loadStationBoard(name,label,date){
+  var forCountry=state.country;
+  // Appended after whatever the station view already rendered - which is
+  // either a live departure list or the historical summary, depending on
+  // whether anything is running. Both want this underneath them.
+  var container=simpleResultEl().querySelector('.track')||simpleResultEl();
+  if(!container)return;
+  container.insertAdjacentHTML('beforeend','<div class="track-journey" id="stationBoard"><h3>What called here today</h3>'+
+    '<div class="rank-loading"><span class="spinner"></span>Loading…</div></div>');
+  var params={country:forCountry,limit:60};
+  if(date)params.date=date;
+  api('/station/'+encodeURIComponent(name)+'/board',params).then(function(b){
+    if(state.country!==forCountry)return;
+    var el=document.getElementById('stationBoard');
+    if(!el)return;
+    var m=b.meta;
+    if(!b.trains.length){
+      el.innerHTML='<h3>What called here today</h3><div class="track-stat-note">No trains recorded at '+esc(label)+' on '+esc(m.date)+'.</div>';
+      return;
+    }
+    el.innerHTML='<h3>What called here on '+esc(m.date)+'</h3>'+
+      '<div class="hist-grid">'+
+        '<div class="hist-stat"><b>'+m.total+'</b><span>trains</span></div>'+
+        '<div class="hist-stat"><b>'+(m.pct_on_time!=null?fmtNum(m.pct_on_time,0)+'%':'—')+'</b><span>on time</span></div>'+
+        '<div class="hist-stat"><b>'+(m.avg_delay!=null?fmtNum(m.avg_delay,1)+' m':'—')+'</b><span>avg delay</span></div>'+
+        (m.cancellations?'<div class="hist-stat"><b style="color:var(--sev-cancel)">'+m.cancellations+'</b><span>cancelled</span></div>':'')+
+      '</div>'+
+      '<div class="tbl-wrap"><table class="dep"><thead><tr><th>Seen</th><th>Train</th><th>To</th><th>Status</th></tr></thead><tbody>'+
+      b.trains.map(function(t){
+        var sev=sevOf(t);
+        return '<tr><td class="num">'+esc(t.seen_at||'—')+'</td>'+
+          '<td>'+routeLabel(t.route_name,t.route_display)+(t.platform?'<span class="jplat">pl. '+esc(t.platform)+'</span>':'')+'</td>'+
+          '<td>'+esc(t.headsign||'—')+'</td>'+
+          '<td class="num '+sev.cls+'"><span class="word">'+esc(sev.word)+'</span>'+(sev.cancelled?'':(' · '+delayLabel(t.delay_minutes)))+'</td></tr>';
+      }).join('')+'</tbody></table></div>'+
+      '<div class="track-stat-note">Showing '+b.trains.length+' of '+m.total+' recorded arrivals, most recent first.</div>';
+  }).catch(function(){
+    var el=document.getElementById('stationBoard');
+    if(el)el.innerHTML='';
+  });
 }
 function showRouteHistory(name,label){
   api('/route/'+encodeURIComponent(name)+'/stats',{country:state.country}).then(function(d){

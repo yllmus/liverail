@@ -13,7 +13,13 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from google.transit import gtfs_realtime_pb2
-from austria_poller import call_radar, call_trip, parse_at_vehicles
+from austria_poller import (
+    call_radar, call_trip, parse_at_vehicles,
+    resolve_trip_id as at_resolve_trip_id,
+)
+from poller import resolve_trip_id as hu_resolve_trip_id
+from at_route_names import extract_at_train_number
+from trip_resolution import local_now
 from poland_poller import fetch_feed, parse_pl_vehicles, resolve_delays, _scheduled_epoch
 from germany_poller import (
     fetch_feed as fetch_de_feed,
@@ -23,7 +29,7 @@ from germany_poller import (
     load_platform_map,
 )
 from station_names import clean_display_name
-from hu_route_names import clean_route_name
+from hu_route_names import clean_route_name, extract_train_number
 from config import DB_PASSWORD
 
 app = FastAPI()
@@ -232,8 +238,11 @@ def _routes_summary_query(country):
     return out
 
 @app.get("/routes/summary")
-def get_routes_summary(country: str = "HU"):
-    return _cached_summary("routes", country, lambda: _routes_summary_query(country), ttl=_WARM_TTL)
+def get_routes_summary(country: str = "HU", format: str = None):
+    rows = _cached_summary("routes", country, lambda: _routes_summary_query(country), ttl=_WARM_TTL)
+    # Same cached rows either way - the export is a rendering choice, not a
+    # second query path that could drift from what the page shows.
+    return _csv_response(rows, f"routes-{country}") if format == "csv" else rows
 
 @app.get("/route/{route_name:path}/delays")
 def get_route_delays(route_name: str, country: str = "HU"):
@@ -381,8 +390,9 @@ def _stations_summary_query(country):
     return [dict(r) for r in rows]
 
 @app.get("/stations/summary")
-def get_stations_summary(country: str = "HU"):
-    return _cached_summary("stations", country, lambda: _stations_summary_query(country), ttl=_WARM_TTL)
+def get_stations_summary(country: str = "HU", format: str = None):
+    rows = _cached_summary("stations", country, lambda: _stations_summary_query(country), ttl=_WARM_TTL)
+    return _csv_response(rows, f"stations-{country}") if format == "csv" else rows
 
 @app.get("/trend")
 def get_trend(route: str = None, station: str = None, days: int = 30, country: str = "HU"):
@@ -1338,6 +1348,177 @@ _JOURNEY_PROVIDERS = {
     "DE": _journey_de,
 }
 
+# --- One train's own history ------------------------------------------
+# The single feature the competitive review rated highest: "is this specific
+# train usually late", not "is this route usually late". Everything needed
+# has been accumulating in delay_observations.trip_id since the per-train
+# identity work; nothing here needs a new data source.
+#
+# What each country can actually answer differs a great deal, and the answer
+# is returned alongside the data rather than papered over (see identity_basis
+# and history_since below). Measured 2026-08-21:
+#   DE  100% of rows carry a real trips.id, every day since 2026-08-01.
+#   PL  100% likewise (its lower all-time share is early-August bulk rows
+#       written before the dedup fix, not a resolution gap).
+#   HU  0% until 2026-08-20, then 23% -> 48% as the train-number resolver
+#       landed. Real, but only days deep.
+#   AT  0% until 2026-08-21, now ~54%. Days deep at best.
+# HU and AT also cannot be looked up by their live id at all: HU's is an
+# OTP-internal gtfsId and AT's a HAFAS composite key, neither of which is
+# stable across days or joinable to the static schedule (NOTES.md, "Live
+# per-train identity"). For those two the train is resolved the same way
+# their pollers resolve it - by the train's public number - so history keyed
+# on trips.id is still reachable. Where even that fails, live_trip_id gives
+# same-day continuity only, and the response says so.
+
+_HISTORY_MAX_DAYS = 365
+
+def _resolve_history_trip(cur, country, train_id):
+    """Map a live train id onto a static trips.id, per country.
+
+    Returns (trip_id, basis, route_name) where basis names which identity path
+    worked, so the caller can be honest about what the history covers, and
+    route_name is the live train's route where we know it (used to scope the
+    opaque-id fallback - see below).
+    """
+    if country in ("PL", "DE"):
+        # The feed's own gtfs_trip_id is what both pollers already write, so
+        # this is a direct lookup - no heuristics involved.
+        cur.execute(
+            "SELECT id FROM trips WHERE gtfs_trip_id = %s AND country_code = %s",
+            (train_id, country),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0], "gtfs_trip_id", None
+        return None, None, None
+
+    # HU/AT: the live id is opaque, so find this train in the current live
+    # snapshot and resolve it by its public number, exactly as the poller does.
+    live = None
+    for t in (get_live_hu() if country == "HU" else get_live("AT")):
+        if t.get("train_id") == train_id:
+            live = t
+            break
+    if live is None:
+        return None, None, None
+    route_name = live.get("route_name")
+    if country == "HU":
+        number = extract_train_number(live.get("train_number"))
+        trip_id = hu_resolve_trip_id(cur, number, live.get("current_stop"),
+                                     live.get("delay_minutes"), local_now("HU"))
+    else:
+        number = extract_at_train_number(live.get("route_name"))
+        trip_id = at_resolve_trip_id(cur, number, live.get("current_stop"),
+                                     live.get("delay_minutes"), local_now("AT"))
+    if trip_id is not None:
+        return trip_id, "train_number", route_name
+    return None, None, route_name
+
+@app.get("/train/{country}/{train_id:path}/history")
+def get_train_history(country: str, train_id: str, days: int = 30):
+    """How this one train has actually run on previous days."""
+    country = country.upper()
+    if country not in _JOURNEY_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unknown country {country}")
+    days = max(1, min(days, _HISTORY_MAX_DAYS))
+
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        plain = conn.cursor()
+        trip_id, basis, live_route = _resolve_history_trip(plain, country, train_id)
+        plain.close()
+
+        # A cancelled run has no delay to average but is the most important
+        # thing in a train's record, so it is counted separately throughout
+        # rather than being dropped or folded in as a zero.
+        if trip_id is not None:
+            where, params = "o.trip_id = %s", [trip_id]
+        else:
+            # No static identity: fall back to the raw feed id, which HU/AT
+            # pollers store unresolved. MAV's OTP ids turn out to be far more
+            # stable across days than expected (one sampled id ran as the same
+            # route for 15 consecutive days), so this is genuinely useful -
+            # but it is NOT safe on its own: 931 of 5,328 HU live ids have
+            # carried more than one route_name, i.e. the id gets reused for a
+            # different train. Scoping to the route the live train is actually
+            # running turns a silently-blended history into a correct one.
+            where = "o.live_trip_id = %s AND o.country_code = %s"
+            params = [train_id, country]
+            if live_route:
+                where += " AND o.route_name = %s"
+                params.append(live_route)
+            basis = "live_trip_id"
+
+        cur.execute(f"""
+            SELECT o.observed_date AS day,
+                   COUNT(*) FILTER (WHERE NOT o.is_cancelled) AS observations,
+                   ROUND(AVG(o.delay_minutes)::numeric, 1) AS avg_delay,
+                   ROUND(MAX(o.delay_minutes)::numeric, 1) AS worst_delay,
+                   COUNT(*) FILTER (WHERE o.is_cancelled) AS cancellations,
+                   ROUND(100.0 * COUNT(*) FILTER (WHERE o.delay_minutes <= 2)
+                         / NULLIF(COUNT(*) FILTER (WHERE NOT o.is_cancelled), 0), 1) AS pct_on_time
+            FROM delay_observations o
+            WHERE {where} AND o.observed_date >= CURRENT_DATE - %s::int
+            GROUP BY o.observed_date
+            ORDER BY o.observed_date DESC
+        """, params + [days])
+        runs = [dict(r) for r in cur.fetchall()]
+
+        cur.execute(f"""
+            SELECT EXTRACT(ISODOW FROM o.observed_date)::int AS dow,
+                   COUNT(*) FILTER (WHERE NOT o.is_cancelled) AS observations,
+                   ROUND(AVG(o.delay_minutes)::numeric, 1) AS avg_delay,
+                   COUNT(*) FILTER (WHERE o.is_cancelled) AS cancellations,
+                   ROUND(100.0 * COUNT(*) FILTER (WHERE o.delay_minutes <= 2)
+                         / NULLIF(COUNT(*) FILTER (WHERE NOT o.is_cancelled), 0), 1) AS pct_on_time
+            FROM delay_observations o
+            WHERE {where} AND o.observed_date >= CURRENT_DATE - %s::int
+            GROUP BY dow ORDER BY dow
+        """, params + [days])
+        by_dow = [dict(r) for r in cur.fetchall()]
+
+        cur.execute(f"""
+            SELECT COUNT(*) FILTER (WHERE NOT o.is_cancelled) AS observations,
+                   COUNT(DISTINCT o.observed_date) AS days_seen,
+                   COUNT(DISTINCT o.route_name) AS distinct_routes,
+                   MIN(o.observed_date) AS first_seen,
+                   ROUND(AVG(o.delay_minutes)::numeric, 1) AS avg_delay,
+                   ROUND(MAX(o.delay_minutes)::numeric, 1) AS worst_delay,
+                   COUNT(*) FILTER (WHERE o.is_cancelled) AS cancellations,
+                   ROUND(100.0 * COUNT(*) FILTER (WHERE o.delay_minutes <= 2)
+                         / NULLIF(COUNT(*) FILTER (WHERE NOT o.is_cancelled), 0), 1) AS pct_on_time
+            FROM delay_observations o
+            WHERE {where} AND o.observed_date >= CURRENT_DATE - %s::int
+        """, params + [days])
+        summary = dict(cur.fetchone() or {})
+    finally:
+        cur.close()
+        conn.close()
+
+    return {
+        "country": country,
+        "train_id": train_id,
+        "days": days,
+        # Which identity path produced this history, and therefore how far it
+        # can be trusted: "gtfs_trip_id" is a real join to the static
+        # schedule, "train_number" is the poller's own resolver, and
+        # "live_trip_id" is an opaque same-day-only correlation.
+        "identity_basis": basis,
+        "has_history": bool(summary.get("observations") or summary.get("cancellations")),
+        # A last-resort integrity check rather than a silent wrong answer: if
+        # the rows we just aggregated span more than one route, the identifier
+        # has been reused for a different train and this "history" is a blend
+        # of two. The frontend says so instead of presenting it as one train's
+        # record.
+        "mixed_identity": (summary.get("distinct_routes") or 0) > 1,
+        "summary": summary,
+        "runs": runs,
+        "by_dow": by_dow,
+        "attribution": COUNTRY_ATTRIBUTION.get(country),
+    }
+
 @app.get("/train/{country}/{train_id:path}")
 def get_train(country: str, train_id: str):
     country = country.upper()
@@ -1387,13 +1568,17 @@ def get_train(country: str, train_id: str):
         "origin": stops[0]["display"] if stops else None,
         "destination": stops[-1]["display"] if stops else None,
         "current_stop": _display_stop(mapping, current, country),
-        "delay_minutes": delay,
+        "delay_minutes": None if journey.get("is_cancelled") else delay,
         "status": journey.get("status") or "IN_TRANSIT_TO",
+        "is_cancelled": bool(journey.get("is_cancelled")),
+        "cancellation_kind": journey.get("cancellation_kind"),
+        "platform": journey.get("platform") or (stops[idx].get("platform") if (idx is not None and stops) else None),
         "stop_idx": idx,
         "stops": stops,
         "lat": journey.get("lat"),
         "lon": journey.get("lon"),
         "position_source": journey.get("position_source"),
+        "journey_scope": journey.get("journey_scope"),
         "route_stats": _train_route_stats(route_name, country),
         "attribution": COUNTRY_ATTRIBUTION.get(country),
     }
@@ -1426,6 +1611,186 @@ def _train_route_stats(route_name, country):
             conn.close()
         return dict(row) if row and row["total"] else None
     return _cached_summary("route_stats:" + route_name, country, compute)
+
+# --- Historical station board -----------------------------------------
+
+@app.get("/station/{station_name:path}/board")
+def get_station_board(station_name: str, country: str = "HU", date: str = None, limit: int = 200):
+    """What actually called at this station on a given day, and how late.
+
+    The live board answers "what is here now"; this answers "what was here",
+    which is what someone checking whether their train ran yesterday needs.
+    Defaults to today so it doubles as a same-day record.
+    """
+    if date:
+        try:
+            day = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    else:
+        day = None
+    limit = max(1, min(limit, 1000))
+
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        # DISTINCT ON collapses the repeated 5-minute samples of one train into
+        # its latest reading for the day - without it a single train that sat
+        # in the feed all afternoon fills the entire board.
+        cur.execute("""
+            SELECT DISTINCT ON (COALESCE(o.trip_id::text, o.live_trip_id, o.route_name), o.route_name)
+                   o.route_name, o.headsign, o.delay_minutes, o.is_cancelled,
+                   o.cancellation_kind, o.platform, o.actual_arrival, o.observed_date,
+                   o.trip_id, o.live_trip_id
+            FROM delay_observations o
+            JOIN stations s ON s.id = o.station_id
+            WHERE s.name = %s AND o.country_code = %s
+              AND o.observed_date = COALESCE(%s::date, CURRENT_DATE)
+            ORDER BY COALESCE(o.trip_id::text, o.live_trip_id, o.route_name), o.route_name, o.id DESC
+        """, (station_name, country, day))
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+    rows.sort(key=lambda r: (r["actual_arrival"] is None, r["actual_arrival"]), reverse=True)
+    shown = rows[:limit]
+    delays = [r["delay_minutes"] for r in rows
+              if not r["is_cancelled"] and r["delay_minutes"] is not None]
+    mapping = _display_map(country)
+    route_mapping = _route_display_map(country)
+    for r in shown:
+        r["route_display"] = _display_route(route_mapping, r.get("route_name"))
+        if r.get("actual_arrival"):
+            r["seen_at"] = r["actual_arrival"].strftime("%H:%M")
+
+    return {
+        "meta": {
+            "country": country,
+            "station": station_name,
+            "station_display": _display_stop(mapping, station_name, country),
+            "date": str(day) if day else str(datetime.now().date()),
+            "total": len(rows),
+            "shown": len(shown),
+            "avg_delay": round(sum(delays) / len(delays), 1) if delays else None,
+            "pct_on_time": (round(100.0 * sum(1 for d in delays if d <= 2) / len(delays), 1)
+                            if delays else None),
+            "cancellations": sum(1 for r in rows if r["is_cancelled"]),
+            "attribution": COUNTRY_ATTRIBUTION.get(country),
+        },
+        "trains": shown,
+    }
+
+# --- Operator / category league table ---------------------------------
+
+def _operators_summary_query(country):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        # routes.agency_name is the operator. Joined through route_name rather
+        # than trip_id because trip_id is only populated for a fraction of
+        # HU/AT rows - route_name is on every row in every country, so this
+        # covers the whole archive rather than only the resolvable slice.
+        # DISTINCT ON picks one agency per route name: a name can legitimately
+        # map to several route rows (direction/branch variants), the same
+        # ambiguity _route_display_map already resolves this way.
+        #
+        # AT needs a different join and produced zero rows without it: what its
+        # poller writes as route_name is a train identity ("RJ 61", "NJ 456"),
+        # not a line code, and those are separate namespaces from routes.name
+        # ("REX81", "S3") - the same mismatch _route_display_map documents.
+        # trips.trip_short_name holds exactly those train identities and joins
+        # to a route, so it is the bridge. Ambiguous identities (one number
+        # reaching routes that disagree on operator) are dropped rather than
+        # guessed, per the same rule used for route labels.
+        if country == "AT":
+            route_agency = """
+                SELECT tsn AS name, MIN(agency_name) AS agency_name FROM (
+                    SELECT t.trip_short_name AS tsn, r.agency_name
+                    FROM trips t JOIN routes r ON r.id = t.route_id
+                    WHERE t.country_code = %s
+                      AND t.trip_short_name IS NOT NULL AND r.agency_name IS NOT NULL
+                    GROUP BY t.trip_short_name, r.agency_name
+                ) x
+                GROUP BY tsn HAVING COUNT(*) = 1
+            """
+        else:
+            route_agency = """
+                SELECT DISTINCT ON (name) name, agency_name
+                FROM routes
+                WHERE country_code = %s AND agency_name IS NOT NULL
+                ORDER BY name, id
+            """
+        cur.execute(f"""
+            WITH route_agency AS ({route_agency})
+            SELECT ra.agency_name AS operator,
+                   COUNT(*) FILTER (WHERE NOT o.is_cancelled) AS total,
+                   COUNT(DISTINCT o.route_name) AS routes,
+                   ROUND(AVG(o.delay_minutes)::numeric, 2) AS avg_delay,
+                   ROUND(MAX(o.delay_minutes)::numeric, 1) AS worst_delay,
+                   COUNT(*) FILTER (WHERE o.is_cancelled) AS cancellations,
+                   ROUND(100.0 * COUNT(*) FILTER (WHERE o.delay_minutes <= 2)
+                         / NULLIF(COUNT(*) FILTER (WHERE NOT o.is_cancelled), 0), 1) AS pct_on_time
+            FROM delay_observations o
+            JOIN route_agency ra ON ra.name = o.route_name
+            WHERE o.country_code = %s
+            GROUP BY ra.agency_name
+            HAVING COUNT(*) >= 20
+            ORDER BY pct_on_time DESC NULLS LAST
+        """, (country, country))
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+# Why a country's operator table can legitimately be empty. Both are gaps in
+# the source data, not bugs to be found later, so they are stated rather than
+# rendered as an unexplained blank table.
+_OPERATOR_GAP_NOTE = {
+    "PL": ("Poland's source feed carries no operator names at all "
+           "(0 of 181 routes), so this ranking cannot be built for PL."),
+    "AT": ("No Austrian trains could be matched to an operator: OBB's live "
+           "feed identifies trains by number rather than by line, and those "
+           "numbers did not resolve to a single operator."),
+}
+
+@app.get("/operators/summary")
+def get_operators_summary(country: str = "HU", format: str = None):
+    """Reliability ranked by operator, not by route or station."""
+    rows = _cached_summary("operators", country, lambda: _operators_summary_query(country),
+                           ttl=_WARM_TTL)
+    if format == "csv":
+        return _csv_response(rows, f"operators-{country}")
+    return {
+        "meta": {
+            "country": country,
+            "operators": len(rows),
+            # An empty leaderboard must say why. Silence would read as "no
+            # data yet" for a gap that is permanent at the source.
+            "note": _OPERATOR_GAP_NOTE.get(country) if not rows else None,
+            "attribution": COUNTRY_ATTRIBUTION.get(country),
+        },
+        "operators": rows,
+    }
+
+# --- CSV export -------------------------------------------------------
+# Zugfinder charges EUR 3.99/mo for data export. For this project it is a
+# query parameter over queries that already exist, so it is simply free.
+
+def _csv_response(rows, filename):
+    import csv as _csv
+    import io as _io
+    buf = _io.StringIO()
+    if rows:
+        writer = _csv.DictWriter(buf, fieldnames=list(rows[0].keys()), extrasaction="ignore")
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+    return PlainTextResponse(
+        buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.csv"'},
+    )
 
 # --- SEO / growth surface ---------------------------------------------
 # Everything above this line is the JSON API the LiveRail SPA (index.html)

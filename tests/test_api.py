@@ -111,3 +111,88 @@ def test_live_de_mocks_gtfs_rt_fetch(monkeypatch):
     resp = client.get("/live?country=DE")
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
+
+
+# --- Phase 2 of the 2026-08-21 competitive-gap plan -------------------
+# These hit the real local Postgres, same as the rest of this file. They
+# assert response *shape* and the honesty guarantees rather than specific
+# delay figures, which change every five minutes.
+
+def test_operators_summary_returns_a_ranking_or_says_why_not():
+    resp = client.get("/operators/summary?country=DE")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["meta"]["country"] == "DE"
+    assert isinstance(body["operators"], list)
+    for row in body["operators"]:
+        assert row["operator"]
+        assert row["total"] >= 20  # the HAVING floor
+
+def test_operators_summary_explains_an_empty_ranking():
+    # PL's feed carries no agency_name at all. An empty table must say why -
+    # silence would read as "no data yet" for a gap that is permanent.
+    resp = client.get("/operators/summary?country=PL")
+    body = resp.json()
+    if not body["operators"]:
+        assert body["meta"]["note"]
+        assert "operator names" in body["meta"]["note"]
+
+def test_operators_summary_csv_export():
+    resp = client.get("/operators/summary?country=HU&format=csv")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/csv")
+    assert "attachment" in resp.headers["content-disposition"]
+    assert resp.text.splitlines()[0].startswith("operator,")
+
+def test_routes_summary_csv_matches_the_json_rows():
+    # The export must come from the same cached rows the page renders, not a
+    # second query that could drift from it.
+    rows = client.get("/routes/summary?country=HU").json()
+    csv_text = client.get("/routes/summary?country=HU&format=csv").text
+    assert csv_text.splitlines()[0].startswith("route_name,")
+    assert len(csv_text.strip().splitlines()) == len(rows) + 1  # + header
+
+def test_station_board_defaults_to_today():
+    resp = client.get("/station/Budapest-Keleti/board?country=HU")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["meta"]["station"] == "Budapest-Keleti"
+    assert body["meta"]["date"]
+    assert isinstance(body["trains"], list)
+
+def test_station_board_rejects_a_malformed_date():
+    resp = client.get("/station/Budapest-Keleti/board?country=HU&date=not-a-date")
+    assert resp.status_code == 400
+
+def test_station_board_accepts_a_past_date():
+    resp = client.get("/station/Budapest-Keleti/board?country=HU&date=2026-08-20")
+    assert resp.status_code == 200
+    assert resp.json()["meta"]["date"] == "2026-08-20"
+
+def test_train_history_route_is_not_swallowed_by_the_catchall():
+    # /train/{country}/{id:path} is greedy and matched /train/DE/x/history
+    # until the more specific route was registered first. Guard against a
+    # future reordering silently breaking it again.
+    resp = client.get("/train/DE/definitely-not-a-real-trip/history")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "identity_basis" in body
+    assert body["has_history"] is False
+
+def test_train_history_reports_its_identity_basis():
+    resp = client.get("/train/PL/definitely-not-a-real-trip/history")
+    body = resp.json()
+    # No static match is possible for a made-up id, so it must fall back to
+    # the opaque identifier and say so rather than implying a real join.
+    assert body["identity_basis"] == "live_trip_id"
+    assert body["mixed_identity"] is False
+
+def test_train_history_rejects_an_unknown_country():
+    resp = client.get("/train/ZZ/whatever/history")
+    assert resp.status_code == 400
+
+def test_train_history_clamps_the_day_range():
+    resp = client.get("/train/DE/nope/history?days=99999")
+    assert resp.json()["days"] == api._HISTORY_MAX_DAYS
+    resp = client.get("/train/DE/nope/history?days=0")
+    assert resp.json()["days"] == 1
