@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from html import escape as _esc
@@ -682,6 +682,54 @@ def get_live_positions(country: str = "HU"):
             "position_source": r.get("position_source"),
         })
     return out
+
+@app.get("/live/worst")
+def get_live_worst(country: str = "HU", kind: str = "route", limit: int = 10):
+    """"Worst right now" - ranked by *current* delay, not the Rankings tab's
+    historical reliability (see /routes/summary, /stations/summary). Item 6
+    of the 2026-08-20 worklist: no rolling-window query existed for this at
+    all before, and the frontend's Rankings tab/footer said so explicitly.
+
+    Deliberately reuses the same get_live(country) snapshot /live/board
+    already fetches (same cache, same TTL) rather than a new fetch or a DB
+    query - this is a live-only view, computed by grouping the in-memory
+    snapshot, not a persisted-history aggregate.
+    """
+    if kind not in ("route", "station"):
+        raise HTTPException(status_code=400, detail="kind must be 'route' or 'station'")
+    key = "route_name" if kind == "route" else "current_stop"
+    groups = {}
+    for r in get_live(country):
+        name = r.get(key)
+        delay = r.get("delay_minutes")
+        if not name or delay is None:
+            continue
+        groups.setdefault(name, []).append(delay)
+
+    mapping = _display_map(country) if kind == "station" else None
+    worst = []
+    for name, delays in groups.items():
+        entry = {
+            "name": name,
+            "train_count": len(delays),
+            "avg_delay": round(sum(delays) / len(delays), 1),
+            "max_delay": round(max(delays), 1),
+        }
+        if kind == "station":
+            entry["display_name"] = _display_stop(mapping, name, country)
+        worst.append(entry)
+    worst.sort(key=lambda e: e["avg_delay"], reverse=True)
+
+    return {
+        "meta": {
+            "country": country,
+            "kind": kind,
+            "groups": len(worst),
+            "attribution": COUNTRY_ATTRIBUTION.get(country),
+            "retrieved_at": datetime.now().isoformat(timespec="seconds"),
+        },
+        "worst": worst[:limit] if limit and limit > 0 else worst,
+    }
 
 def get_live_hu():
     try:

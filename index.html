@@ -432,7 +432,18 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 
   <section class="view" id="view-rankings">
     <h2>Rankings</h2>
-    <p class="h2-note">Historical reliability — every station/route with at least 20 (stations) or 5 (routes) recorded observations, ranked by on-time percentage. This is <em>not</em> a "worst right now" view; that would need a rolling-window query this API doesn't build yet.</p>
+    <p class="h2-note">Worst right now — this instant's live snapshot, grouped by route/station. Below it: historical reliability, every station/route with at least 20 (stations) or 5 (routes) recorded observations, ranked by on-time percentage.</p>
+    <div class="rank-grid">
+      <div>
+        <div class="panel-head" style="border:1px solid var(--line);border-bottom:none;border-radius:var(--radius) var(--radius) 0 0"><h3>Worst stations right now</h3><span class="cnt" id="worstStationCount"></span></div>
+        <div class="tbl-wrap" style="border-radius:0 0 var(--radius) var(--radius);border-top:none"><table class="dep" id="worstStationTbl"><thead></thead><tbody></tbody></table></div>
+      </div>
+      <div>
+        <div class="panel-head" style="border:1px solid var(--line);border-bottom:none;border-radius:var(--radius) var(--radius) 0 0"><h3>Worst routes right now</h3><span class="cnt" id="worstRouteCount"></span></div>
+        <div class="tbl-wrap" style="border-radius:0 0 var(--radius) var(--radius);border-top:none"><table class="dep" id="worstRouteTbl"><thead></thead><tbody></tbody></table></div>
+      </div>
+    </div>
+    <h2 style="margin-top:32px">Historical reliability</h2>
     <div class="rank-grid">
       <div>
         <div class="panel-head" style="border:1px solid var(--line);border-bottom:none;border-radius:var(--radius) var(--radius) 0 0"><h3>Stations</h3><span class="cnt" id="stationRankCount"></span></div>
@@ -476,7 +487,7 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
     <h3>Attribution</h3>
     <div id="attribBox"></div>
     <h3 style="margin-top:22px">Known coverage gaps — not hidden</h3>
-    <p class="gapnote">No country has "worst right now" ranked live, only historical reliability (Rankings tab). PL and Germany's map positions are schedule-interpolated rather than GPS and only resolve for a minority of trains. Germany's live coverage skews toward DB Regio / S-Bahn service; long-distance ICE/IC visibility is limited. Route labels for Austria, Poland, and Germany are the raw operator line codes (e.g. <code>RE54</code>) — no human-friendly line description exists in the source data yet.</p>
+    <p class="gapnote">PL and Germany's map positions are schedule-interpolated rather than GPS and only resolve for a minority of trains. Germany's live coverage skews toward DB Regio / S-Bahn service; long-distance ICE/IC visibility is limited. Route labels for Austria, Poland, and Germany are the raw operator line codes (e.g. <code>RE54</code>) — no human-friendly line description exists in the source data yet.</p>
   </div>
 </footer>
 
@@ -717,8 +728,47 @@ function rankLoading(kind,label){
     '<thead></thead><tbody><tr><td class="rank-loading"><span class="spinner"></span>Loading '+label+
     ' — this can take up to a minute the first time.</td></tr></tbody>';
 }
+function loadLiveWorst(){
+  var forCountry=state.country;
+  ['worstStation','worstRoute'].forEach(function(id){
+    document.getElementById(id+'Count').textContent='';
+    document.getElementById(id+'Tbl').innerHTML='<thead></thead><tbody><tr><td class="rank-loading"><span class="spinner"></span>Loading…</td></tr></tbody>';
+  });
+  api('/live/worst',{country:forCountry,kind:'station'}).then(function(res){
+    if(state.country!==forCountry)return;
+    renderWorstTable('worstStation','station',res.worst);
+    document.getElementById('worstStationCount').textContent=res.worst.length+' of '+res.meta.groups;
+  }).catch(function(){if(state.country===forCountry)document.getElementById('worstStationTbl').innerHTML='<thead></thead><tbody><tr><td class="error-msg">Couldn’t load. <a href="#" onclick="loadLiveWorst();return false">Try again</a></td></tr></tbody>';});
+  api('/live/worst',{country:forCountry,kind:'route'}).then(function(res){
+    if(state.country!==forCountry)return;
+    renderWorstTable('worstRoute','route',res.worst);
+    document.getElementById('worstRouteCount').textContent=res.worst.length+' of '+res.meta.groups;
+  }).catch(function(){if(state.country===forCountry)document.getElementById('worstRouteTbl').innerHTML='<thead></thead><tbody><tr><td class="error-msg">Couldn’t load. <a href="#" onclick="loadLiveWorst();return false">Try again</a></td></tr></tbody>';});
+}
+function renderWorstTable(id,kind,rows){
+  var tbl=document.getElementById(id+'Tbl');
+  tbl.querySelector('thead').innerHTML='<tr><th>'+(kind==='station'?'Station':'Route')+'</th><th>Trains</th><th>Avg delay</th><th>Worst</th></tr>';
+  if(!rows.length){
+    tbl.querySelector('tbody').innerHTML='<tr><td colspan="4" class="rank-loading">Nothing currently delayed.</td></tr>';
+    return;
+  }
+  tbl.querySelector('tbody').innerHTML=rows.map(function(r){
+    var label=r.display_name||r.name;
+    var sev=sevInfo(r.avg_delay);
+    return '<tr class="clickable" data-name="'+esc(r.name)+'">'+
+      '<td>'+esc(label)+'</td>'+
+      '<td class="num">'+r.train_count+'</td>'+
+      '<td class="num" style="color:var('+sevColorVar(sev.cls)+')">'+delayLabel(r.avg_delay)+'</td>'+
+      '<td class="num">'+delayLabel(r.max_delay)+'</td>'+
+      '</tr>';
+  }).join('');
+  Array.prototype.forEach.call(tbl.querySelectorAll('tr[data-name]'),function(tr){
+    tr.addEventListener('click',function(){openDetail(kind,tr.getAttribute('data-name'));});
+  });
+}
 function loadRankings(){
   var forCountry=state.country;
+  loadLiveWorst();
   rankLoading('station','stations');rankLoading('route','routes');
   api('/stations/summary',{country:forCountry}).then(function(rows){
     // A country switch mid-request must not paint the old country's numbers.
