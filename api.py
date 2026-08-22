@@ -19,7 +19,7 @@ from austria_poller import (
 )
 from poller import resolve_trip_id as hu_resolve_trip_id
 from at_route_names import extract_at_train_number
-from trip_resolution import local_now
+from trip_resolution import local_now, COUNTRY_TIMEZONES
 from poland_poller import fetch_feed, parse_pl_vehicles, resolve_delays, _scheduled_epoch
 from search_text import normalize_search_text
 from germany_poller import (
@@ -276,6 +276,226 @@ def refresh_search_index(country):
         """, rows, page_size=1000)
         conn.commit()
         return len(rows)
+    finally:
+        cur.close()
+        conn.close()
+
+# --- Phase 3: journey planning, Hungary first -------------------------
+# Connection risk needs itineraries with transfers, and this project has never
+# had a route planner of any kind. Rather than write a connection-scan search,
+# MÁV's own OTP endpoint plans for us - the same host the HU poller already
+# polls, so no new dependency and no new failure mode.
+#
+# Only HU. Checked, not assumed: ÖBB's HAFAS exposes journeys() and could be
+# added as a third one-shot Node script (the established pattern), but DB's
+# HAFAS is dead and mkuran.pl is a data mirror with no planning API, so PL and
+# DE need a connection-scan search over stop_times we already hold. Those are
+# real work; this endpoint returns an explicit 501 for them rather than
+# pretending the capability is uniform.
+#
+# The response shape is OURS, not OTP's, precisely so adding Austria second
+# does not force a rewrite of everything that consumes it.
+#
+# Two HU-specific corrections are applied to every leg, both already solved
+# elsewhere in this codebase and both needed here:
+#   * route.longName is OTP's grouped slash-list ("rjx 60/62/66"), not a route
+#     identifier - confirmed again in a live plan response. clean_route_name()
+#     turns it into this train's own name, exactly as the poller does.
+#   * tripShortName leads with the train's real public number ("62 railjet
+#     xpress"), which extract_train_number() pulls out - so each leg arrives
+#     already joinable to our own history rather than being an opaque OTP id.
+_PLAN_CACHE = {}
+_PLAN_LOCKS = {}
+_PLAN_TTL = 600          # 10 min: a timetable does not move, delays do
+_PLAN_MAX_ITINERARIES = 6
+
+_PLAN_QUERY = """{
+  plan(from: {lat: %(flat)f, lon: %(flon)f},
+       to: {lat: %(tlat)f, lon: %(tlon)f},
+       date: "%(date)s", time: "%(time)s",
+       numItineraries: %(n)d, transportModes: [{mode: RAIL}]) {
+    itineraries {
+      startTime endTime duration
+      legs {
+        mode startTime endTime realTime departureDelay arrivalDelay
+        from { name } to { name }
+        trip { gtfsId tripShortName route { longName } }
+      }
+    }
+  }
+}"""
+
+def _plan_station(cur, country, name):
+    cur.execute("""SELECT id, name, COALESCE(display_name, name), lat, lon
+                   FROM stations
+                   WHERE country_code = %s AND name = %s AND lat IS NOT NULL
+                   LIMIT 1""", (country, name))
+    row = cur.fetchone()
+    if row:
+        return row
+    # Fall back to the search index so a rider can type a display name or a
+    # near-miss, rather than needing the exact GTFS join key.
+    cur.execute("""SELECT s.id, s.name, COALESCE(s.display_name, s.name), s.lat, s.lon
+                   FROM stations s
+                   WHERE s.country_code = %s AND s.lat IS NOT NULL
+                     AND (s.display_name ILIKE %s OR s.name ILIKE %s)
+                   ORDER BY length(s.name) LIMIT 1""",
+                (country, f"%{name}%", f"%{name}%"))
+    return cur.fetchone()
+
+def _epoch_ms_to_local(ms, country):
+    if ms is None:
+        return None
+    tz = ZoneInfo(COUNTRY_TIMEZONES.get(country, "Europe/Budapest"))
+    return datetime.fromtimestamp(ms / 1000, tz)
+
+def _normalise_plan(raw, country, cur):
+    """OTP's itineraries -> our shape, with transfers made explicit.
+
+    The transfer list is the whole reason this endpoint exists: Phase 4 reads
+    the buffer between two legs at a shared station, so it is computed here
+    once rather than re-derived by every caller.
+    """
+    out = []
+    for it in raw:
+        legs = []
+        for leg in it.get("legs") or []:
+            trip = leg.get("trip") or {}
+            short = trip.get("tripShortName")
+            route_name = clean_route_name((trip.get("route") or {}).get("longName"), short)
+            number = extract_train_number(short)
+            dep = _epoch_ms_to_local(leg.get("startTime"), country)
+            arr = _epoch_ms_to_local(leg.get("endTime"), country)
+            legs.append({
+                "mode": leg.get("mode"),
+                "from": (leg.get("from") or {}).get("name"),
+                "to": (leg.get("to") or {}).get("name"),
+                "depart": dep.isoformat() if dep else None,
+                "arrive": arr.isoformat() if arr else None,
+                "depart_hm": dep.strftime("%H:%M") if dep else None,
+                "arrive_hm": arr.strftime("%H:%M") if arr else None,
+                "route_name": route_name,
+                # The public number, which is what our own history is keyed on
+                # for HU - not OTP's gtfsId, which is internal to their
+                # instance and joins to nothing here (NOTES.md, HU trip_id).
+                "train_number": number,
+                "live_trip_id": trip.get("gtfsId"),
+                "departure_delay_min": (leg.get("departureDelay") or 0) / 60.0,
+                "arrival_delay_min": (leg.get("arrivalDelay") or 0) / 60.0,
+                "realtime": bool(leg.get("realTime")),
+            })
+        # OTP inserts zero-length WALK legs between two trains at the SAME
+        # station even when only RAIL is requested - confirmed in a real
+        # Debrecen->Sopron response, where a Budapest-Keleti walk leg of
+        # 11:52->11:52 turned one genuine 38-minute transfer into two phantom
+        # ones (a 0-minute change, and a change whose feeder was the walk).
+        # Transfers and the change count come from transit legs only; the walk
+        # legs stay in `legs` so the itinerary is not silently rewritten.
+        transit = [l for l in legs if l.get("train_number") or l.get("route_name")]
+        transfers = []
+        for a, b in zip(transit, transit[1:]):
+            buffer_min = None
+            if a["arrive"] and b["depart"]:
+                buffer_min = round(
+                    (datetime.fromisoformat(b["depart"]) - datetime.fromisoformat(a["arrive"])
+                     ).total_seconds() / 60.0, 1)
+            transfers.append({
+                "station": a["to"],
+                "arrive": a["arrive"], "depart": b["depart"],
+                "buffer_min": buffer_min,
+                "feeder_route": a["route_name"], "feeder_number": a["train_number"],
+                "connector_route": b["route_name"], "connector_number": b["train_number"],
+                # Phase 4 fills this. Stated as unknown rather than omitted so
+                # a consumer cannot mistake "not computed" for "no risk".
+                "risk": None,
+            })
+        start = _epoch_ms_to_local(it.get("startTime"), country)
+        end = _epoch_ms_to_local(it.get("endTime"), country)
+        out.append({
+            "duration_min": round((it.get("duration") or 0) / 60.0),
+            "depart": start.isoformat() if start else None,
+            "arrive": end.isoformat() if end else None,
+            "depart_hm": start.strftime("%H:%M") if start else None,
+            "arrive_hm": end.strftime("%H:%M") if end else None,
+            "changes": max(0, len(transit) - 1),
+            "legs": legs,
+            "transfers": transfers,
+        })
+    return out
+
+@app.get("/plan")
+def get_plan(country: str = "HU", origin: str = "", destination: str = "",
+             date: str = None, time_: str = None, itineraries: int = 3):
+    """Plan a journey. Hungary only - see the block comment above for why."""
+    country = country.upper()
+    if country != "HU":
+        raise HTTPException(
+            status_code=501,
+            detail=(f"Journey planning is not available for {country}. Only Hungary has a "
+                    "usable planner today (MÁV's OTP). Austria could reuse hafas-client's "
+                    "journeys(); Germany's HAFAS is shut down and Poland's feed is a data "
+                    "mirror with no planning API, so both need a connection-scan search "
+                    "over the imported stop_times."))
+    if not origin or not destination:
+        raise HTTPException(status_code=400, detail="origin and destination are required")
+    n = max(1, min(itineraries, _PLAN_MAX_ITINERARIES))
+    now_local = local_now(country)
+    date = date or now_local.strftime("%Y-%m-%d")
+    time_ = time_ or now_local.strftime("%H:%M")
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+        datetime.strptime(time_, "%H:%M")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD and time HH:MM")
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        frm = _plan_station(cur, country, origin)
+        to = _plan_station(cur, country, destination)
+        if not frm:
+            raise HTTPException(status_code=404, detail=f"No station matching {origin!r}")
+        if not to:
+            raise HTTPException(status_code=404, detail=f"No station matching {destination!r}")
+        if frm[0] == to[0]:
+            raise HTTPException(status_code=400, detail="origin and destination are the same station")
+
+        # Cached per origin/destination/hour: this is an outbound call on a
+        # single-vCPU box already shared with four pollers, and the same
+        # commuter pair gets asked for repeatedly.
+        key = (country, frm[0], to[0], date, time_[:2], n)
+        cached = _PLAN_CACHE.get(key)
+        if cached and time.time() < cached["expires"]:
+            return cached["data"]
+        lock = _PLAN_LOCKS.setdefault(key, threading.Lock())
+        with lock:
+            cached = _PLAN_CACHE.get(key)
+            if cached and time.time() < cached["expires"]:
+                return cached["data"]
+            q = _PLAN_QUERY % {"flat": frm[3], "flon": frm[4], "tlat": to[3], "tlon": to[4],
+                               "date": date, "time": time_ + ":00", "n": n}
+            try:
+                resp = req.post(GRAPHQL_URL, json={"query": q}, timeout=25)
+                body = resp.json()
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"MÁV's planner did not respond: {exc}")
+            if body.get("errors"):
+                raise HTTPException(status_code=502,
+                                    detail=f"MÁV's planner rejected the query: {body['errors'][:1]}")
+            raw = ((body.get("data") or {}).get("plan") or {}).get("itineraries") or []
+            result = {
+                "country": country,
+                "origin": {"name": frm[1], "display": frm[2]},
+                "destination": {"name": to[1], "display": to[2]},
+                "date": date, "time": time_,
+                # Named so a consumer can tell a borrowed planner from one of
+                # ours when Austria/Poland/Germany arrive by different routes.
+                "planner": "mav-otp",
+                "itineraries": _normalise_plan(raw, country, cur),
+                "attribution": COUNTRY_ATTRIBUTION.get(country),
+            }
+            _PLAN_CACHE[key] = {"data": result, "expires": time.time() + _PLAN_TTL}
+            return result
     finally:
         cur.close()
         conn.close()

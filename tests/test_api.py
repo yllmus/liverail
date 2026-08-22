@@ -365,3 +365,31 @@ def test_distribution_falls_back_when_the_route_is_unknown():
                    "&route_name=NO-SUCH-ROUTE-ZZZ").json()
     if b["found"]:
         assert b["basis"] == "station"
+
+# --- Phase 3: journey planning ----------------------------------------
+
+def test_plan_is_501_for_countries_without_a_planner():
+    # Not 404 and not an empty result: the capability genuinely does not exist
+    # for three of four countries, and the response says why rather than
+    # implying the journey is unplannable.
+    for c in ("DE", "PL", "AT"):
+        r = client.get(f"/plan?country={c}&origin=A&destination=B")
+        assert r.status_code == 501
+        assert "planner" in r.json()["detail"].lower()
+
+def test_plan_requires_both_endpoints():
+    assert client.get("/plan?country=HU&origin=Budapest-Keleti").status_code == 400
+
+def test_plan_rejects_a_malformed_date_or_time():
+    assert client.get("/plan?country=HU&origin=Debrecen&destination=Sopron"
+                      "&date=22-08-2026").status_code == 400
+    assert client.get("/plan?country=HU&origin=Debrecen&destination=Sopron"
+                      "&time_=9am").status_code == 400
+
+def test_plan_404s_on_an_unknown_station():
+    r = client.get("/plan?country=HU&origin=Nowhere-At-All-XYZ&destination=Sopron")
+    assert r.status_code == 404
+
+def test_plan_rejects_identical_endpoints():
+    r = client.get("/plan?country=HU&origin=Debrecen&destination=Debrecen")
+    assert r.status_code == 400
