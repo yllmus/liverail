@@ -463,6 +463,8 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 .sres-other-h{padding:6px 14px 4px;font:700 10px var(--font-mono);text-transform:uppercase;
   letter-spacing:.06em;color:var(--text-dim);border-top:1px solid var(--border);background:var(--bg)}
 .stag-cc{color:var(--accent-ink)!important;background:var(--accent);border-radius:4px;padding:2px 5px}
+.plan-xb{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-dim);white-space:nowrap}
+.plan-xb input{accent-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -534,11 +536,12 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
   <section class="view" id="view-plan">
     <div class="panel">
       <h2>Plan a journey</h2>
-      <p class="panel-sub" id="planAvail">Hungary only for now — MÁV is the one operator of the four that publishes a journey planner we can use.</p>
+      <p class="panel-sub" id="planAvail"></p>
       <div class="plan-form">
         <input id="planFrom" class="plan-in" type="text" placeholder="From (e.g. Debrecen)" autocomplete="off">
         <input id="planTo" class="plan-in" type="text" placeholder="To (e.g. Sopron)" autocomplete="off">
         <input id="planTime" class="plan-in plan-time" type="time">
+        <label class="plan-xb"><input type="checkbox" id="planIntl"> Crosses a border</label>
         <button id="planGo" class="btn btn-primary">Find journeys</button>
       </div>
       <div id="planResult"></div>
@@ -757,30 +760,39 @@ Array.prototype.forEach.call(document.querySelectorAll('.vtab'),function(btn){
 // shows what it is based on, because a number whose provenance is invisible
 // is worse than no number.
 var PLAN_RISK_CLASS={comfortable:'sev-ok','usually fine':'sev-ok',tight:'sev-late',unlikely:'sev-bad'};
+// Which countries can plan, and how. Mirrors _PLAN_PROVIDERS in api.py -
+// Germany is the one country with no planner, because DB's HAFAS is shut down
+// AND its poller samples too few stops per trip to search over.
+var PLAN_OK={HU:'MÁV\u2019s own planner',AT:'ÖBB\u2019s planner',PL:'our imported timetable'};
 function initPlan(){
   var t=document.getElementById('planTime');
   if(t&&!t.value){var d=new Date();t.value=('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);}
-  var avail=document.getElementById('planAvail');
-  if(avail)avail.style.display=(state.country==='HU')?'':'none';
+  var intl=document.getElementById('planIntl'), avail=document.getElementById('planAvail');
+  var crossing=intl&&intl.checked;
+  if(avail){
+    avail.textContent=crossing
+      ? 'Crossing a border — planned by ÖBB, which routes across all four countries and beyond. Delay history is attached per station from whichever country records it.'
+      : (PLAN_OK[state.country]
+          ? 'Journeys within '+META[state.country].label+', planned by '+PLAN_OK[state.country]+'.'
+          : 'Germany has no journey planner: DB\u2019s was shut down, and our own timetable search needs stop coverage Germany does not have yet. Tick “crosses a border” to plan with ÖBB instead.');
+  }
   var res=document.getElementById('planResult');
-  if(state.country!=='HU'&&res&&!res.dataset.warned){
-    res.dataset.warned='1';
-  }
-  if(state.country!=='HU'&&res){
-    res.innerHTML='<div class="empty-msg">Journey planning is only available for Hungary at the moment. '+
-      'MÁV publishes a planner we can use; Germany\u2019s was shut down, and Poland\u2019s feed is a data mirror with none. '+
-      'Switch the country to Hungary to plan a journey.</div>';
-  }
+  if(res&&!crossing&&!PLAN_OK[state.country]&&!res.dataset.k){res.innerHTML='';}
 }
 function runPlan(){
   var res=document.getElementById('planResult');
-  if(state.country!=='HU'){initPlan();return;}
+  var intl=document.getElementById('planIntl');
+  var crossing=intl&&intl.checked;
+  var planCountry=crossing?'INT':state.country;
+  if(!crossing&&!PLAN_OK[state.country]){initPlan();
+    res.innerHTML='<div class="empty-msg">Germany has no journey planner yet. Tick \u201ccrosses a border\u201d to plan the same journey with ÖBB.</div>';
+    return;}
   var from=(document.getElementById('planFrom')||{}).value||'';
   var to=(document.getElementById('planTo')||{}).value||'';
   var tm=(document.getElementById('planTime')||{}).value||'';
   if(!from||!to){res.innerHTML='<div class="empty-msg">Enter where you are starting and where you are going.</div>';return;}
   res.innerHTML='<div class="rank-loading"><span class="spinner"></span>Asking MÁV for journeys\u2026</div>';
-  var q={origin:from,destination:to,itineraries:4};
+  var q={origin:from,destination:to,itineraries:4,country:planCountry};
   if(tm)q.time_=tm;
   api('/plan',q).then(function(d){renderPlan(res,d);})
    .catch(function(e){res.innerHTML='<div class="empty-msg">Could not plan that journey. '+esc(String(e&&e.message||''))+'</div>';});
@@ -845,7 +857,10 @@ function renderPlan(el,d){
     });
     html+='</div>';
   });
-  html+='<div class="track-stat-note">Journeys from MÁV\u2019s own planner. Risk figures are from this site\u2019s recorded delay history for Hungary only.</div>';
+  var src=(d.planner==='mav-otp'?'MÁV\u2019s own planner':(d.planner==='csa-timetable'?'a search over our imported timetable':'ÖBB\u2019s planner'));
+  var from=(d.risk_data_countries&&d.risk_data_countries.length)?d.risk_data_countries.join(', '):(d.country==='INT'?'none of the four':d.country);
+  html+='<div class="track-stat-note">Journeys from '+esc(src)+'. Risk figures come from recorded delay history for: '+esc(from)+'.'+
+    (d.country==='INT'?' Stations outside these four countries have no history here, and say so rather than guessing.':'')+'</div>';
   el.innerHTML=html;
 }
 /* ---------- attribution / countries meta ---------- */
@@ -1235,6 +1250,7 @@ wireSearch('cmpInput','cmpPop',function(r){addCompare(r.name);},'route');
    data, not a separate parallel feature to keep in sync. */
 wireTrainSearch('simpleInput','simplePop');
 var _pg=document.getElementById('planGo');if(_pg)_pg.addEventListener('click',runPlan);
+var _pi=document.getElementById('planIntl');if(_pi)_pi.addEventListener('change',initPlan);
 Array.prototype.forEach.call(document.querySelectorAll('[data-view-link]'),function(a){
   a.addEventListener('click',function(e){
     e.preventDefault();
