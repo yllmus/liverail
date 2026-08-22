@@ -118,6 +118,7 @@ def test_live_de_mocks_gtfs_rt_fetch(monkeypatch):
 # assert response *shape* and the honesty guarantees rather than specific
 # delay figures, which change every five minutes.
 
+@pytest.mark.slow  # whole-country aggregate; see pytest.ini / TESTING.md
 def test_operators_summary_returns_a_ranking_or_says_why_not():
     resp = client.get("/operators/summary?country=DE")
     assert resp.status_code == 200
@@ -128,6 +129,7 @@ def test_operators_summary_returns_a_ranking_or_says_why_not():
         assert row["operator"]
         assert row["total"] >= 20  # the HAVING floor
 
+@pytest.mark.slow  # whole-country aggregate; see pytest.ini / TESTING.md
 def test_operators_summary_explains_an_empty_ranking():
     # PL's feed carries no agency_name at all. An empty table must say why -
     # silence would read as "no data yet" for a gap that is permanent.
@@ -137,6 +139,7 @@ def test_operators_summary_explains_an_empty_ranking():
         assert body["meta"]["note"]
         assert "operator names" in body["meta"]["note"]
 
+@pytest.mark.slow  # whole-country aggregate; see pytest.ini / TESTING.md
 def test_operators_summary_csv_export():
     resp = client.get("/operators/summary?country=HU&format=csv")
     assert resp.status_code == 200
@@ -144,6 +147,7 @@ def test_operators_summary_csv_export():
     assert "attachment" in resp.headers["content-disposition"]
     assert resp.text.splitlines()[0].startswith("operator,")
 
+@pytest.mark.slow  # whole-country aggregate; see pytest.ini / TESTING.md
 def test_routes_summary_csv_matches_the_json_rows():
     # The export must come from the same cached rows the page renders, not a
     # second query that could drift from it.
@@ -152,6 +156,7 @@ def test_routes_summary_csv_matches_the_json_rows():
     assert csv_text.splitlines()[0].startswith("route_name,")
     assert len(csv_text.strip().splitlines()) == len(rows) + 1  # + header
 
+@pytest.mark.slow  # same missing index as the past-date case above
 def test_station_board_defaults_to_today():
     resp = client.get("/station/Budapest-Keleti/board?country=HU")
     assert resp.status_code == 200
@@ -160,10 +165,18 @@ def test_station_board_defaults_to_today():
     assert body["meta"]["date"]
     assert isinstance(body["trains"], list)
 
+@pytest.mark.slow  # same missing index as the past-date case above
 def test_station_board_rejects_a_malformed_date():
     resp = client.get("/station/Budapest-Keleti/board?country=HU&date=not-a-date")
     assert resp.status_code == 400
 
+@pytest.mark.slow  # NOT an aggregate like the others - this one is a real missing
+                   # index. /station/{name}/board filters observed_date, but
+                   # idx_delay_obs_station_country is (station_id, country_code)
+                   # only, so EXPLAIN shows observed_date as a Filter rather than
+                   # an Index Cond: every row for a busy station is heap-fetched
+                   # and discarded. Today's date is fast only because those rows
+                   # are still in page cache. Fix is an index - see TESTING.md.
 def test_station_board_accepts_a_past_date():
     resp = client.get("/station/Budapest-Keleti/board?country=HU&date=2026-08-20")
     assert resp.status_code == 200
@@ -238,6 +251,8 @@ def test_search_limit_is_clamped():
 
 # --- SEO safety -------------------------------------------------------
 
+@pytest.mark.slow  # /sitemap.xml warms routes_list for ALL FOUR countries;
+                   # ~60-90s cold (nginx's timeout was raised to 120s for it)
 def test_thin_pages_are_excluded_from_the_sitemap():
     resp = client.get("/sitemap.xml")
     assert resp.status_code == 200
@@ -271,6 +286,9 @@ def test_a_thin_page_still_renders_but_says_noindex():
     assert resp.status_code == 200
     assert 'content="noindex,follow"' in resp.text
 
+@pytest.mark.slow  # the SEO page for a BUSY station (Budapest-Keleti, 164k+ rows).
+                   # The thin-page test above passes instantly - it is row volume
+                   # on a cold page cache, same family as the board tests.
 def test_a_busy_page_is_still_indexable():
     resp = client.get("/t/HU/station/Budapest-Keleti")
     assert resp.status_code == 200

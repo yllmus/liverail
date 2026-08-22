@@ -156,6 +156,14 @@ def _warm_summaries():
 
 @app.on_event("startup")
 def _start_warmer():
+    # Not under pytest. Importing this module in a test starts a real
+    # TestClient, which fires this startup hook - and the aggregates behind it
+    # cost 49-162s per country (see above), for all four, on a single vCPU
+    # shared with four pollers. That turned a ~2min suite into one that ran
+    # past 8 minutes and starved the live API while it did. Nothing in the
+    # tests reads the warmed cache; each test computes what it needs.
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("TRAINAPI_NO_WARMER"):
+        return
     threading.Thread(target=_warm_summaries, daemon=True).start()
 
 # --- Searchable name index -------------------------------------------
