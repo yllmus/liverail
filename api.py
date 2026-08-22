@@ -594,6 +594,21 @@ def resolve_station_anywhere(cur, name):
         for extra in at_station_name_candidates(bare):
             if extra not in candidates:
                 candidates.append(extra)
+    # gtfs.de prefixes interchange stations with their urban-rail modes:
+    # Berlin's main station is "S+U Berlin Hauptbahnhof", not "Berlin Hbf",
+    # and 28 DE stations are named this way. Nothing HAFAS returns carries
+    # that prefix, so without adding it here Berlin Hbf resolved to AT's
+    # thin copy (4,365 observations) instead of DE's own (7,030) - or, for a
+    # station only Germany has, to nothing at all. Both directions are
+    # generated: strip the prefix off an incoming name, and add it to one.
+    for c in list(candidates):
+        stripped = re.sub(r"^(S\+U|U\+S|S|U)\s+", "", c).strip()
+        if stripped and stripped != c and stripped not in candidates:
+            candidates.append(stripped)
+        for prefix in ("S+U ", "S ", "U "):
+            pref = prefix + c
+            if pref not in candidates:
+                candidates.append(pref)
     cur.execute("""
         SELECT s.country_code, s.id, s.name, COALESCE(s.display_name, s.name),
                COALESCE(d.sample_count, 0) AS obs
