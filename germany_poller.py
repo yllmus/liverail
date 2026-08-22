@@ -16,11 +16,24 @@ DB_CONFIG = {
 }
 
 COUNTRY_CODE = "DE"
-# How many of a trip's remaining stops to record per poll. 1 was the original
-# behaviour and left Germany with exactly ONE route-station pair holding 14+
-# days of history; unbounded fixed the depth and cost 6.1x the writes. See
-# TESTING.md for the measurements behind this number.
-MAX_STOPS_PER_TRIP = 3
+# How many of a trip's remaining stops to record ON EACH POLL. This is NOT a
+# limit on how many stops of a journey get recorded: gtfs.de publishes only
+# the stops a train has left, and we poll every five minutes, so the window
+# slides forward as the train runs. Stop 12 is not in it at 09:00 and is once
+# the train is three stops away. Measured on a real day with this set to 3:
+# the most stops recorded on a single trip was 74, the average 7.9, and 55% of
+# trips recorded more than three.
+#
+# What the cap removes is the far-future guesses - gtfs.de predicting the delay
+# at stop 40 while the train is still at stop 1, then revising it every poll.
+# Those were a large share of the write volume and the least trustworthy
+# figures in the feed; a prediction made three stops out is worth far more to a
+# delay distribution than one made forty.
+#
+# 1 was the original behaviour and left Germany with exactly ONE route-station
+# pair holding 14+ days of history. Unbounded fixed the depth and cost 6.1x the
+# writes. See TESTING.md.
+STOPS_PER_POLL = 3
 # Don't write a row for a change smaller than this. Measured on a real day:
 # 22% of all DE rows were sub-minute re-predictions - gtfs.de restating the
 # same delay in seconds. That is noise for a delay distribution, and it is
@@ -114,14 +127,10 @@ def parse_de_vehicles(feed):
         # The write cost is bounded not by this loop but by the dedup below,
         # which is keyed per (trip, stop): a stop is written when its own
         # predicted delay changes, not once per poll.
-        # Capped, not unbounded. Sampling every published stop fixed the depth
-        # problem and cost 6.1x the write volume - ~1.18M rows/day against
-        # 192,380 before, roughly 27 GB/month, which this box cannot carry for
-        # long. gtfs.de publishes 6.6 remaining stops per trip on average, so
-        # taking the next few keeps most of the coverage benefit at a fraction
-        # of the cost: a train passes every one of its stops eventually, so
-        # over a journey each stop still gets sampled - just from closer in.
-        for stu in trip_update.stop_time_update[:MAX_STOPS_PER_TRIP]:
+        # The nearest few remaining stops, per poll - see STOPS_PER_POLL. Every
+        # stop of a journey still gets recorded, because the window slides as
+        # the train advances.
+        for stu in trip_update.stop_time_update[:STOPS_PER_POLL]:
             _emit_stop(rows, trip_update, gtfs_trip_id, stu)
     return rows
 
