@@ -2,6 +2,7 @@ import argparse
 import os
 import pandas as pd
 import psycopg2
+from psycopg2.extras import execute_values
 
 from station_names import clean_display_name
 
@@ -33,6 +34,15 @@ parser.add_argument("--with-stop-times", action="store_true", help=(
     "only exposes stop_sequence + absolute times, no stop_id/delay) need "
     "scheduled stop_times to resolve stations and compute delay."
 ))
+parser.add_argument("--service-id-prefix", default="", help=(
+    "Prefix for service_id, for the same reason --route-id-prefix exists and "
+    "with the same urgency. Germany is assembled from two GTFS zips that "
+    "number their services independently: 861 service_ids appear in both "
+    "fv_free and rv_free, and 399 of the first 400 checked describe DIFFERENT "
+    "week patterns. Importing both calendars unprefixed would attach a "
+    "long-distance trip to a regional service's running days and plan trains "
+    "on days they do not run. Single-feed countries (HU, AT, PL) leave this "
+    "empty and are unaffected."))
 parser.add_argument("--route-id-prefix", default="", help=(
     "Prefix applied to gtfs_route_id on insert and on the trips->routes "
     "lookup (stops/trips ids are left alone). Needed when a single country "
@@ -157,6 +167,11 @@ def _clean(v):
     # existing rows since routes/trips upsert with ON CONFLICT DO UPDATE.
     return v.strip() if isinstance(v, str) and v.strip() else None
 
+def _prefixed_service(v):
+    """Namespace a service_id when a country is built from several feeds."""
+    return None if v is None else args.service_id_prefix + v
+
+
 # agency.txt is optional per feed (not every extracted gtfs_dir has one —
 # AT's/PL's don't, since only stops/routes/trips were pulled from their
 # zips) and agency is a route-level GTFS concept, not a trip-level one, so
@@ -208,7 +223,8 @@ for _, row in trips.iterrows():
             headsign = EXCLUDED.headsign, route_id = EXCLUDED.route_id,
             service_id = EXCLUDED.service_id,
             trip_short_name = EXCLUDED.trip_short_name
-    """, (row["trip_id"], country, headsign, _clean(row.get("service_id")),
+    """, (row["trip_id"], country, headsign,
+          _prefixed_service(_clean(row.get("service_id"))),
           _clean(row.get("trip_short_name")),
           args.route_id_prefix + row["route_id"], country))
 conn.commit()
@@ -233,12 +249,46 @@ if os.path.exists(_calendar_path):
             ON CONFLICT (country_code, service_id) DO UPDATE SET
                 {', '.join(f'{d} = EXCLUDED.{d}' for d in _days)},
                 start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date
-        """, (country, row["service_id"], *[row.get(d) == "1" for d in _days],
+        """, (country, _prefixed_service(row["service_id"]), *[row.get(d) == "1" for d in _days],
               _gtfs_date(row.get("start_date")), _gtfs_date(row.get("end_date"))))
     conn.commit()
     print(f"Imported {len(calendar)} calendar entries.")
 else:
     print(f"No calendar.txt in {gtfs_dir}, skipping calendar import.")
+
+# calendar_dates.txt: individual dates a service is added to or removed from
+# its weekly pattern. GTFS treats the two as complementary, not alternative,
+# and both are needed to answer "does this service run on date D":
+#
+#   a calendar row matching D's weekday and inside its validity window,
+#   OR  an exception row for D with added = true,
+#   AND NOT an exception row for D with added = false
+#
+# It is not optional decoration. Poland's feed ships NO calendar.txt at all -
+# every one of its 7,557 service days is an exception_type=1 row here - so
+# without this, PL's journey planner found no services running on any date and
+# returned nothing for every query. Germany uses it the other way round, as
+# holiday and engineering exceptions layered on real weekly patterns.
+#
+# exception_type is 1 = added, 2 = removed; stored as a boolean because there
+# are only ever those two. See schema/013_service_dates.sql.
+_caldates_path = f"{gtfs_dir}/calendar_dates.txt"
+if os.path.exists(_caldates_path):
+    print(f"Importing calendar exceptions for {country}...")
+    caldates = pd.read_csv(_caldates_path, dtype=str)
+    _rows = [(country, _prefixed_service(r["service_id"]), _gtfs_date(r["date"]),
+              str(r.get("exception_type")) == "1")
+             for _, r in caldates.iterrows()]
+    execute_values(cur, """
+        INSERT INTO service_date (country_code, service_id, service_date, added)
+        VALUES %s
+        ON CONFLICT (country_code, service_id, service_date)
+        DO UPDATE SET added = EXCLUDED.added
+    """, _rows, page_size=1000)
+    conn.commit()
+    print(f"Imported {len(_rows)} calendar exceptions.")
+else:
+    print(f"No calendar_dates.txt in {gtfs_dir}, skipping exceptions.")
 
 if args.with_stop_times:
     print(f"Importing stop_times for {country}...")
