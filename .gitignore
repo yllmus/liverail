@@ -66,6 +66,8 @@
 !schema/011_station_board_date_index.sql
 !schema/012_delay_distribution.sql
 !schema/013_service_dates.sql
+!schema/014_delay_mixture.sql
+!transfer_backtest.py
 !pl_planner.py
 !tests/test_pl_planner.py
 

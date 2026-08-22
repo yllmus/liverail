@@ -165,6 +165,14 @@ def _warm_summaries():
             try:
                 if _delay_distribution_stale(country):
                     refresh_delay_distribution(country)
+                    # Mixtures are fitted from raw observations in Python, so
+                    # they cannot ride along with the SQL percentile pass.
+                    # Only when the distributions were actually rebuilt.
+                    try:
+                        n = fit_station_mixtures(country)
+                        print(f"fitted {n} station mixtures for {country}")
+                    except Exception as exc:
+                        print(f"mixture fit {country} failed: {exc}")
             except Exception as exc:
                 print(f"delay distribution refresh {country} failed: {exc}")
         time.sleep(_WARM_INTERVAL)
@@ -503,6 +511,37 @@ def _sample_at(pts, u):
 
 _RISK_GRID = 24  # 24x24 = 576 pairs; finer than the stored quantiles justify
 
+def _mixture_of(row):
+    """The fitted mixture on a distribution row, if it has one."""
+    if not row or row.get("mix_w1") is None:
+        return None
+    import numpy as _np
+    return {"weight": _np.array([row["mix_w1"], 1.0 - row["mix_w1"]]),
+            "mu": _np.array([row["mix_mu1"], row["mix_mu2"]]),
+            "sigma": _np.array([row["mix_sig1"], row["mix_sig2"]]),
+            "shift": row["mix_shift"]}
+
+
+def _transfer_probability_mixture(feeder, connector, buffer_min, mct_min, n=4000):
+    """Monte Carlo over fitted mixtures. None when the feeder has no fit.
+
+    Preferred over the quantile curve wherever both are available: measured on
+    18,227 held-out German transfers, Brier 0.0350 against the quantile
+    model's 0.0403, and without the systematic pessimism that showed in every
+    reliability bin of both countries tested. See transfer_backtest.py.
+    """
+    f = _mixture_of(feeder)
+    if f is None:
+        return None
+    import numpy as _np
+    from transfer_backtest import sample_mixture
+    rng = _np.random.default_rng(0)   # deterministic: same inputs, same answer
+    fd = sample_mixture(f, n, rng)
+    c = _mixture_of(connector)
+    cd = sample_mixture(c, n, rng) if c is not None else _np.zeros(n)
+    return float(_np.mean((fd - cd) <= (buffer_min - mct_min)))
+
+
 def _transfer_probability(feeder, connector, buffer_min, mct_min):
     """Grid convolution of two reconstructed curves. None if either is absent."""
     fpts = _quantile_curve(feeder) if feeder else []
@@ -555,7 +594,8 @@ def _dist_row_map(row):
         return None
     keys = ("basis", "basis_key", "sample_count", "days_seen", "p50", "p75", "p90", "p95",
             "worst", "arr_p50", "arr_p90", "dep_p50", "dep_p90", "arr_samples",
-            "dep_samples", "cancellation_rate")
+            "dep_samples", "cancellation_rate",
+            "mix_w1", "mix_mu1", "mix_sig1", "mix_mu2", "mix_sig2", "mix_shift", "mix_n")
     return dict(zip(keys, row))
 
 def resolve_station_anywhere(cur, name):
@@ -695,7 +735,29 @@ def assess_transfer(cur, country, station_name, buffer_min,
                 "reason": ("No delay distribution deep enough for the arriving train at this "
                            "station yet. Stop-level history began on 21 August 2026.")}
 
-    p = _transfer_probability(feeder, connector, buffer_min, mct)
+    # Mixture first, quantile curve as the fallback. The fallback is not
+    # vestigial: a station too thin to fit a mixture on still has percentiles,
+    # and a bad fit on twenty observations would be worse than either.
+    p = _transfer_probability_mixture(feeder, connector, buffer_min, mct)
+    basis_model = "mixture"
+    if p is None:
+        p = _transfer_probability(feeder, connector, buffer_min, mct)
+        basis_model = "quantiles"
+    if p is not None:
+        # A cancelled feeder misses the connection whatever the buffer, and the
+        # delay distribution knows nothing about that - cancelled rows carry a
+        # NULL delay and are excluded from the percentiles by construction. So
+        # the delay-based probability is conditional on the train running, and
+        # has to be multiplied by the chance that it does.
+        #
+        # Without this the mixture happily returned exactly 1.0 for a
+        # thirty-minute buffer, which is never true of a railway.
+        run_rate = 1.0 - float(feeder.get("cancellation_rate") or 0.0)
+        p = max(0.0, min(1.0, p * run_rate))
+        # And never claim certainty. Disruption this model cannot see -
+        # a strike, a line closure, a missed platform announcement - is not
+        # in any delay distribution.
+        p = min(p, 0.99)
     return {
         "assessed": True,
         "station": station_name,
@@ -717,7 +779,11 @@ def assess_transfer(cur, country, station_name, buffer_min,
         # The stored curve stops at p95, so nothing above that is modelled and
         # the probability can never read better than 0.95. Said out loud so a
         # ceiling is not mistaken for a certainty.
-        "tail_unmodelled_above_pct": 95,
+        # Which curve answered. The quantile fallback stops at p95 and cannot
+        # report better than 0.95; the mixture models the tail and has no such
+        # ceiling.
+        "model": basis_model,
+        "tail_unmodelled_above_pct": 95 if basis_model == "quantiles" else None,
         # Provenance on both sides: which ladder rung answered and how deep it
         # was. A risk figure without these is not checkable.
         "feeder_basis": feeder.get("basis"), "feeder_samples": feeder.get("sample_count"),
@@ -1267,6 +1333,57 @@ def _delay_distribution_stale(country, max_age_hours=24):
         cur.close()
         conn.close()
 
+def fit_station_mixtures(country, min_samples=200):
+    """Fit a two-component lognormal mixture per station and store it.
+
+    Runs after refresh_delay_distribution, on the station rung only. The
+    trip and route rungs are far more numerous and far thinner; a mixture
+    fitted on twenty observations is worse than the percentiles it would
+    replace, and the percentiles remain as the fallback everywhere.
+
+    Backtested before shipping (see transfer_backtest.py and
+    schema/014_delay_mixture.sql): on 18,227 held-out German transfers the
+    mixture scored 0.0350 against the percentile model's 0.0403, and fixed a
+    systematic pessimism that appeared in every reliability bin of both
+    countries tested.
+    """
+    from transfer_backtest import fit_lognormal_mixture
+    conn = get_conn()
+    cur = conn.cursor()
+    written = 0
+    try:
+        cur.execute("""
+            SELECT o.station_id, o.delay_minutes
+            FROM delay_observations o
+            WHERE o.country_code = %s AND o.delay_minutes IS NOT NULL
+              AND NOT o.is_cancelled
+              AND o.observed_date >= CURRENT_DATE - 30
+        """, (country,))
+        by_station = {}
+        for station_id, delay in cur.fetchall():
+            by_station.setdefault(station_id, []).append(float(delay))
+        for station_id, values in by_station.items():
+            if len(values) < min_samples:
+                continue
+            fit = fit_lognormal_mixture(values)
+            if fit is None:
+                continue
+            cur.execute("""
+                UPDATE delay_distribution
+                SET mix_w1 = %s, mix_mu1 = %s, mix_sig1 = %s,
+                    mix_mu2 = %s, mix_sig2 = %s, mix_shift = %s, mix_n = %s
+                WHERE country_code = %s AND station_id = %s AND scope = 'station'
+            """, (float(fit["weight"][0]), float(fit["mu"][0]), float(fit["sigma"][0]),
+                  float(fit["mu"][1]), float(fit["sigma"][1]), float(fit["shift"]),
+                  len(values), country, station_id))
+            written += cur.rowcount
+        conn.commit()
+        return written
+    finally:
+        cur.close()
+        conn.close()
+
+
 def refresh_delay_distribution(country):
     """Recompute all three ladder rungs for one country. Warmer thread only."""
     conn = get_conn()
@@ -1335,7 +1452,8 @@ def lookup_delay_distribution(cur, country, station_id, trip_id=None, route_name
         cur.execute("""
             SELECT scope, scope_key, sample_count, days_seen, p50, p75, p90, p95, worst,
                    arr_p50, arr_p90, dep_p50, dep_p90, arr_samples, dep_samples,
-                   cancellation_rate
+                   cancellation_rate,
+                   mix_w1, mix_mu1, mix_sig1, mix_mu2, mix_sig2, mix_shift, mix_n
             FROM delay_distribution
             WHERE country_code = %s AND station_id = %s AND scope = %s AND scope_key = %s
               AND hour_band IS NULL AND weekday_type IS NULL
@@ -1384,7 +1502,8 @@ def get_distribution(country: str = "HU", station: str = "", trip_id: int = None
         return base
     keys = ("basis", "basis_key", "sample_count", "days_seen", "p50", "p75", "p90", "p95",
             "worst", "arr_p50", "arr_p90", "dep_p50", "dep_p90", "arr_samples",
-            "dep_samples", "cancellation_rate")
+            "dep_samples", "cancellation_rate",
+            "mix_w1", "mix_mu1", "mix_sig1", "mix_mu2", "mix_sig2", "mix_shift", "mix_n")
     base.update({"found": True})
     base.update(dict(zip(keys, row)))
     # AT never publishes arrival delays at all (0/314 measured) - structural,

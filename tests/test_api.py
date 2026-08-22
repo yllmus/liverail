@@ -433,12 +433,19 @@ def test_transfer_risk_is_monotonic_in_the_buffer():
     assert ps == sorted(ps)
     assert ps and ps[0] < ps[-1]
 
-def test_transfer_risk_never_claims_better_than_the_modelled_tail():
+def test_transfer_risk_never_claims_certainty():
+    # The quantile fallback stops at p95 and cannot report better than 0.95.
+    # The mixture models the tail and has no such ceiling, but must still never
+    # return 1.0: a cancelled feeder misses whatever the buffer, and no delay
+    # distribution can see a strike or a line closure.
     b = client.get("/transfer/risk?country=AT&station=Wien Quartier Belvedere"
                    "&buffer_min=600").json()
     if b["assessed"]:
-        assert b["probability"] <= 0.95
-        assert b["tail_unmodelled_above_pct"] == 95
+        assert b["probability"] <= 0.99
+        assert b["model"] in ("mixture", "quantiles")
+        if b["model"] == "quantiles":
+            assert b["probability"] <= 0.95
+            assert b["tail_unmodelled_above_pct"] == 95
 
 def test_plan_supports_every_registered_planner_country():
     # The registry is the single source of truth for which countries can plan;
