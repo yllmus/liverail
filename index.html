@@ -1339,12 +1339,14 @@ function renderTrain(d){
     (mappable.length?'<div class="track-map" id="trackMap"></div>':'')+
     renderJourney(d)+
     '<div class="track-stats" id="trainHistory"></div>'+
+    '<div class="track-stats" id="trainStops"></div>'+
     renderRouteStats(d)+
     simpleActionsHtml()+
   '</div>';
   simpleResultEl().innerHTML=html;
   if(mappable.length)drawTrainMap(d,mappable);
   loadTrainHistory(d);
+  loadTrainStops(d);
   loadSimpleActions(state.country,'affiliate_booking');
   if(d.delay_minutes!=null&&d.delay_minutes>0)checkSimpleCompensation(d.delay_minutes);
 }
@@ -1421,6 +1423,57 @@ function renderTrainHistory(el,h){
   html+='<div class="track-stat-note">'+basis+(s.first_seen?' since '+esc(s.first_seen):'')+'.'+
     (h.identity_basis==='live_trip_id'?' Matched by the operator’s live identifier, which is only reliable within a single route.':'')+
     '</div>';
+  el.innerHTML=html;
+}
+// Phase 2: where a train loses time, from /train/{country}/{id}/stops.
+// Medians and p90s rather than means - delay distributions are right-skewed,
+// and p90 is the figure that decides whether a connection is makeable.
+function fmtStopDelay(v){return v==null?'\u2014':(v>0?'+':'')+fmtNum(v,1);}
+function loadTrainStops(d){
+  var el=document.getElementById('trainStops');
+  if(!el||!d.train_id)return;
+  var forCountry=state.country;
+  el.innerHTML='<h3>Where this train loses time</h3><div class="rank-loading"><span class="spinner"></span>Checking its stops\u2026</div>';
+  api('/train/'+forCountry+'/'+encodeURIComponent(d.train_id)+'/stops',{days:30}).then(function(t){
+    if(state.country!==forCountry)return;
+    renderTrainStops(el,t);
+  }).catch(function(){el.innerHTML='';});
+}
+function renderTrainStops(el,t){
+  var stops=t.stops||[];
+  var head='<h3>Where this train loses time</h3>';
+  if(!stops.length){
+    // The API explains *why* there is nothing (usually: the trip could not be
+    // resolved, so no stop identity was ever recorded). Showing an empty table
+    // instead would read as "this train calls nowhere".
+    el.innerHTML=head+'<div class="track-stat-note">'+esc(t.reason||'No stop-by-stop record for this train yet.')+'</div>';
+    return;
+  }
+  var html=head;
+  if(!t.sufficient_sample){
+    html+='<div class="hist-warn">Stop-by-stop records only began on 21 August 2026, so these come from very few runs. Treat them as early indications, not settled averages.</div>';
+  }
+  var arr=t.arrival_available;
+  html+='<div class="tbl-wrap" style="margin-top:12px"><table class="dep"><thead><tr>'+
+    '<th>Stop</th><th>Due</th>'+(arr?'<th>Arr med</th><th>Arr p90</th>':'')+
+    '<th>Dep med</th><th>Dep p90</th><th>Runs</th></tr></thead><tbody>'+
+    stops.map(function(s){
+      var m=s.median_departure_delay;
+      var sev=(m!=null)?sevInfo(m):{cls:''};
+      var due=String(s.scheduled_arrival||s.scheduled_departure||'\u2014').slice(0,5);
+      return '<tr><td>'+esc(s.station_display||s.station_name||'\u2014')+'</td>'+
+        '<td class="num">'+esc(due)+'</td>'+
+        (arr?('<td class="num">'+fmtStopDelay(s.median_arrival_delay)+'</td>'+
+              '<td class="num">'+fmtStopDelay(s.p90_arrival_delay)+'</td>'):'')+
+        '<td class="num" style="color:var('+sevColorVar(sev.cls)+')">'+fmtStopDelay(s.median_departure_delay)+'</td>'+
+        '<td class="num">'+fmtStopDelay(s.p90_departure_delay)+'</td>'+
+        '<td class="num">'+(s.observations||0)+'</td></tr>';
+    }).join('')+'</tbody></table></div>';
+  if(!arr){
+    // Structural, not a thin sample - say so, or an empty arrival column reads
+    // as "this train is never late arriving".
+    html+='<div class="track-stat-note">Austria\u2019s live feed publishes departure delays only, never arrivals, so those columns are omitted. That is a limit of \u00d6BB\u2019s data, not a gap in this train\u2019s record.</div>';
+  }
   el.innerHTML=html;
 }
 function renderJourney(d){

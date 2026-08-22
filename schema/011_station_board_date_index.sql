@@ -1,0 +1,51 @@
+-- /station/{name}/board could not use an index for its date filter, so asking
+-- about a past day at a busy station read that station's entire history.
+--
+-- THE QUERY (api.py, get_station_board) filters three things:
+--     WHERE s.name = %s AND o.country_code = %s AND o.observed_date = <day>
+-- The best available index was idx_delay_obs_station_country, on
+-- (station_id, country_code) with an INCLUDE payload. observed_date is in
+-- neither part, so EXPLAIN showed it as a post-Filter:
+--
+--     Index Scan using idx_delay_obs_station_country
+--       Index Cond: ((station_id = s.id) AND (country_code = 'HU'))
+--       Filter: (observed_date = '2026-08-20'::date)
+--
+-- Every row Budapest-Keleti has ever recorded (164k+) was fetched from the
+-- heap so that one day's worth could be kept. Today's date looked fast only
+-- because those rows were still in the page cache; a full pg_dump for the
+-- off-site backup evicted it and the real cost became visible. Four tests in
+-- tests/test_api.py are marked `slow` solely because of this - see TESTING.md.
+--
+-- WHY (station_id, observed_date) AND NOT (station_id, country_code,
+-- observed_date). A station belongs to exactly one country, so country_code
+-- adds no selectivity after station_id - it would only widen every entry. The
+-- planner can apply it as a cheap recheck on rows it has to visit anyway for
+-- route_name, headsign, platform and the rest, none of which are in any
+-- index. Narrower entries mean more of this index stays resident, which is
+-- the binding constraint on a box with 1.9 GB of RAM.
+--
+-- NO INCLUDE, for the same reason. The board reads ten columns; carrying them
+-- all would roughly quadruple the index (idx_delay_obs_station_country is
+-- 2 GB largely because of its INCLUDE payload) to save a heap visit for the
+-- few hundred rows a single station-day actually has. The expensive part was
+-- never fetching those rows - it was fetching the other 163,000.
+--
+-- CONCURRENTLY: four pollers write to this table every five minutes. Note
+-- that an index sits in an INVALID state for the whole build and only becomes
+-- valid at the end - that is normal progress, NOT a failure, and it is worth
+-- knowing before someone (as happened here) sees indisvalid=false, concludes
+-- the build died, and issues a DROP that then blocks behind the CREATE still
+-- running. Check for genuine leftovers only once no build is in flight:
+--     SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;
+--
+-- idx_delay_obs_station_country is deliberately left in place: its INCLUDE
+-- payload serves /station/{name}/stats as an index-only scan, which this
+-- narrower index cannot. Whether the two should be consolidated into one
+-- (station_id, observed_date, country_code) INCLUDE (delay_minutes,
+-- actual_arrival) is a real question, but it means dropping a 2 GB index that
+-- currently serves 263,000 scans and rebuilding for ~20 minutes if the
+-- judgement is wrong. Left as is for now - see TESTING.md.
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_delay_obs_station_date
+    ON delay_observations (station_id, observed_date);
