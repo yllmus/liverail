@@ -75,6 +75,8 @@
 # the repo previously had no CREATE TABLE for the six core tables at all.
 # deploy/ is the machine configuration that NOTES.md had always described as
 # "not tracked in this git repo"; without it the code alone cannot be run.
+!analysis/
+!analysis/*.py
 !pytest.ini
 !schema/schema.sql
 !deploy/
