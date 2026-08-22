@@ -64,6 +64,9 @@
 !schema/010_poller_dedup_index.sql
 !schema/011_station_board_date_index.sql
 !schema/012_delay_distribution.sql
+!schema/013_service_dates.sql
+!pl_planner.py
+!tests/test_pl_planner.py
 
 # Disaster recovery (2026-08-22). schema.sql is the generated full structure -
 # the repo previously had no CREATE TABLE for the six core tables at all.

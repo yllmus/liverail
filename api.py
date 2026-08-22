@@ -21,6 +21,7 @@ from austria_poller import (
 from poller import resolve_trip_id as hu_resolve_trip_id
 from at_route_names import extract_at_train_number
 from trip_resolution import local_now, COUNTRY_TIMEZONES
+import pl_planner
 from poland_poller import fetch_feed, parse_pl_vehicles, resolve_delays, _scheduled_epoch
 from search_text import normalize_search_text
 from germany_poller import (
@@ -707,6 +708,77 @@ def _normalise_plan_at(raw, country, cur):
         })
     return out
 
+def _normalise_plan_pl(cur, origin_id, destination_id, service_date, from_sec, n):
+    """Poland: search our own imported timetable, then emit the shared shape.
+
+    The only country of the four planned from data we hold rather than an
+    operator's planner - MÁV and ÖBB have one to call, Germany's is shut down
+    and mkuran.pl is a data mirror. This is a connection scan over stop_times;
+    see pl_planner.py for the algorithm and what it deliberately omits.
+
+    Later departures are produced by re-scanning from just after each previous
+    itinerary's first departure, which is the cheap way to get alternatives out
+    of an earliest-arrival search: the connection list is loaded once and every
+    extra scan is a few hundredths of a second over it.
+    """
+    conns = pl_planner.load_connections(cur, "PL", service_date, from_sec)
+    seen, itineraries, cursor_sec = set(), [], from_sec
+    for _ in range(n):
+        chain = pl_planner.scan(conns, origin_id, destination_id, cursor_sec)
+        if not chain:
+            break
+        legs_raw = pl_planner.chain_to_legs(chain)
+        if not legs_raw:
+            break
+        key = tuple((l["trip_id"], l["depart_sec"]) for l in legs_raw)
+        if key in seen:
+            break
+        seen.add(key)
+        cursor_sec = legs_raw[0]["depart_sec"] + 60
+        ids = {l["from_station"] for l in legs_raw} | {l["to_station"] for l in legs_raw}
+        cur.execute("""SELECT id, name, COALESCE(display_name, name) FROM stations
+                       WHERE id = ANY(%s)""", (list(ids),))
+        names = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+        legs = []
+        for l in legs_raw:
+            frm = names.get(l["from_station"], (None, None))
+            to = names.get(l["to_station"], (None, None))
+            legs.append({
+                "mode": "RAIL", "from": frm[0], "to": to[0],
+                "depart": None, "arrive": None,
+                "depart_hm": pl_planner.seconds_to_hm(l["depart_sec"]),
+                "arrive_hm": pl_planner.seconds_to_hm(l["arrive_sec"]),
+                "route_name": l["route_name"],
+                "train_number": l.get("trip_short_name"),
+                "live_trip_id": None,
+                "departure_delay_min": 0.0, "arrival_delay_min": 0.0,
+                # Timetable only. Saying so matters: HU and AT carry live
+                # delays on their legs and PL's would otherwise read as
+                # "running exactly on time" rather than "not known".
+                "realtime": False,
+            })
+        transfers = []
+        for a, b in zip(legs_raw, legs_raw[1:]):
+            station_name = names.get(a["to_station"], (None, None))[0]
+            buffer_min = round((b["depart_sec"] - a["arrive_sec"]) / 60.0, 1)
+            transfers.append({
+                "station": station_name,
+                "arrive": None, "depart": None, "buffer_min": buffer_min,
+                "feeder_route": a["route_name"], "feeder_number": a.get("trip_short_name"),
+                "connector_route": b["route_name"], "connector_number": b.get("trip_short_name"),
+                "risk": assess_transfer(cur, "PL", station_name, buffer_min,
+                                        a["route_name"], b["route_name"]),
+            })
+        itineraries.append({
+            "duration_min": round((legs_raw[-1]["arrive_sec"] - legs_raw[0]["depart_sec"]) / 60.0),
+            "depart": None, "arrive": None,
+            "depart_hm": pl_planner.seconds_to_hm(legs_raw[0]["depart_sec"]),
+            "arrive_hm": pl_planner.seconds_to_hm(legs_raw[-1]["arrive_sec"]),
+            "changes": max(0, len(legs_raw) - 1),
+            "legs": legs, "transfers": transfers,
+        })
+    return itineraries
+
 def _parse_iso(v):
     if not v:
         return None
@@ -718,7 +790,7 @@ def _parse_iso(v):
 # Which countries can plan at all, and how. A registry rather than an if/elif
 # chain for the same reason _LIVE_PROVIDERS is one: adding a country should be
 # an entry, not another copy of the surrounding plumbing.
-_PLAN_PROVIDERS = {"HU": "mav-otp", "AT": "oebb-hafas"}
+_PLAN_PROVIDERS = {"HU": "mav-otp", "AT": "oebb-hafas", "PL": "csa-timetable"}
 
 @app.get("/plan")
 def get_plan(country: str = "HU", origin: str = "", destination: str = "",
@@ -769,7 +841,11 @@ def get_plan(country: str = "HU", origin: str = "", destination: str = "",
             cached = _PLAN_CACHE.get(key)
             if cached and time.time() < cached["expires"]:
                 return cached["data"]
-            if country == "AT":
+            if country == "PL":
+                itineraries = _normalise_plan_pl(
+                    cur, frm[0], to[0], datetime.strptime(date, "%Y-%m-%d").date(),
+                    pl_planner.hms_to_seconds(time_ + ":00"), n)
+            elif country == "AT":
                 dep_iso = f"{date}T{time_}:00"
                 # ÖBB resolves by its own station names, so pass the names we
                 # hold. journeys.js reports what it matched so a wrong match is

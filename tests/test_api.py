@@ -369,12 +369,13 @@ def test_distribution_falls_back_when_the_route_is_unknown():
 # --- Phase 3: journey planning ----------------------------------------
 
 def test_plan_is_501_for_countries_without_a_planner():
-    # DE and PL only. Austria gained a planner once hafas-client's journeys()
-    # was wired in - Germany's HAFAS is shut down and Poland's feed is a data
-    # mirror, so both still need a connection-scan search we have not built.
+    # Germany alone now. HU borrows MÁV's OTP, AT borrows ÖBB's HAFAS, and PL
+    # is planned from our own imported timetable by a connection scan. DE's
+    # HAFAS is shut down AND its poller samples too few stops per trip to
+    # support the search, so it is the one country still without one.
     # Not 404 and not an empty result: the capability genuinely does not
     # exist, and the response says why rather than implying no route exists.
-    for c in ("DE", "PL"):
+    for c in ("DE",):
         r = client.get(f"/plan?country={c}&origin=A&destination=B")
         assert r.status_code == 501
         # Must explain what is actually missing, not just refuse. A bare 501
@@ -441,9 +442,9 @@ def test_transfer_risk_never_claims_better_than_the_modelled_tail():
         assert b["probability"] <= 0.95
         assert b["tail_unmodelled_above_pct"] == 95
 
-def test_plan_supports_both_planner_countries():
+def test_plan_supports_every_registered_planner_country():
     # The registry is the single source of truth for which countries can plan;
     # a country in it must not return 501.
-    assert set(api._PLAN_PROVIDERS) == {"HU", "AT"}
+    assert set(api._PLAN_PROVIDERS) == {"HU", "AT", "PL"}
     for c in api._PLAN_PROVIDERS:
         assert client.get(f"/plan?country={c}&origin=X").status_code != 501
