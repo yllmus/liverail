@@ -293,3 +293,38 @@ def test_a_busy_page_is_still_indexable():
     resp = client.get("/t/HU/station/Budapest-Keleti")
     assert resp.status_code == 200
     assert "noindex" not in resp.text
+
+# --- Phase 2: per-stop delay profile ----------------------------------
+# DE and PL are used throughout: their identity resolution is a direct
+# gtfs_trip_id lookup. HU and AT would call get_live_*() and hit the network.
+
+def test_train_stops_route_is_not_swallowed_by_the_catchall():
+    # Same greedy-route hazard the /history test guards. /stops was registered
+    # after /history and before /train/{country}/{id:path}; a future reorder
+    # would silently turn this into the catch-all.
+    resp = client.get("/train/DE/definitely-not-a-real-trip/stops")
+    assert resp.status_code == 200
+    assert "stops" in resp.json()
+
+def test_train_stops_explains_an_unresolved_trip_instead_of_returning_nothing():
+    # Phase 1 writes stop_sequence only when the trip resolved, so an
+    # unresolved train has no stop rows at all. An empty list on its own would
+    # read as "this train calls nowhere" - it must say why.
+    body = client.get("/train/PL/definitely-not-a-real-trip/stops").json()
+    assert body["stops"] == []
+    assert body["reason"]
+    assert "stop identity" in body["reason"]
+
+def test_train_stops_flags_that_at_publishes_no_arrival_delays():
+    # Structural, not a thin sample: OBB's radar() never sets arrivalDelay
+    # (0/314 measured), so the arrival columns are permanently NULL for AT.
+    # Rendering that as "never late arriving" would be exactly backwards.
+    assert client.get("/train/DE/nope/stops").json()["arrival_available"] is True
+    assert client.get("/train/PL/nope/stops").json()["arrival_available"] is True
+
+def test_train_stops_rejects_an_unknown_country():
+    assert client.get("/train/ZZ/whatever/stops").status_code == 400
+
+def test_train_stops_clamps_the_day_range():
+    assert client.get("/train/DE/nope/stops?days=99999").json()["days"] == api._HISTORY_MAX_DAYS
+    assert client.get("/train/DE/nope/stops?days=0").json()["days"] == 1

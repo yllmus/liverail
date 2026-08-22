@@ -1718,6 +1718,116 @@ def get_train_history(country: str, train_id: str, days: int = 30):
         "attribution": COUNTRY_ATTRIBUTION.get(country),
     }
 
+# --- Phase 2: how this train runs at each stop -------------------------
+# schema/008_stop_identity.sql built idx_delay_obs_trip_stop for exactly this
+# read: "every observation of this trip at this stop". /history answers "is
+# this train usually late"; this answers "*where* does it lose the time", which
+# is the question a transfer depends on - and the input connection risk needs.
+#
+# Three honesty constraints, all of them real and all surfaced rather than
+# hidden behind a plausible-looking average:
+#
+#   SAMPLE DEPTH. stop_sequence has only been written since 2026-08-21, so
+#   every stop here starts at n=1. A median over one run is not a median. Each
+#   stop carries its own observation and day counts, and `sufficient_sample`
+#   marks the ones that clear _MIN_STOP_SAMPLE - NOTES.md puts the bar for
+#   connection risk at ~20 days, and nothing here pretends to have reached it.
+#
+#   AT HAS NO ARRIVAL DELAYS AT ALL. Not a bug and not a thin sample: ÖBB's
+#   radar() never populates arrivalDelay (0/314 measured), so the poller
+#   correctly writes NULL rather than copying the departure figure. Reporting
+#   an empty arrival column without saying why would read as "this train is
+#   never late arriving". `arrival_available` says it outright.
+#
+#   NO STOP IDENTITY WITHOUT A RESOLVED TRIP. Phase 1 writes stop_sequence only
+#   when trip_id resolved, so a train falling back to live_trip_id has no stop
+#   rows whatsoever. That returns an explicit reason, not an empty list that
+#   looks like "this train calls nowhere".
+_MIN_STOP_SAMPLE = 20  # days; see NOTES.md "Next features" on history depth
+
+@app.get("/train/{country}/{train_id:path}/stops")
+def get_train_stops(country: str, train_id: str, days: int = 30):
+    """Per-stop delay profile for one train: where it loses or makes up time."""
+    country = country.upper()
+    if country not in _JOURNEY_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unknown country {country}")
+    days = max(1, min(days, _HISTORY_MAX_DAYS))
+
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        plain = conn.cursor()
+        trip_id, basis, _live_route = _resolve_history_trip(plain, country, train_id)
+        plain.close()
+
+        if trip_id is None:
+            # Deliberately not falling back to live_trip_id the way /history
+            # does: those rows carry no stop_sequence by construction, so the
+            # fallback could only ever return nothing.
+            return {
+                "country": country, "train_id": train_id, "days": days,
+                "identity_basis": basis, "stops": [],
+                "arrival_available": country != "AT",
+                "reason": ("This train has no resolved static trip, so no stop "
+                           "identity was recorded for it. Stop-level history "
+                           "needs the trip resolved at poll time."),
+                "attribution": COUNTRY_ATTRIBUTION.get(country),
+            }
+
+        # Median rather than mean throughout: delay distributions are strongly
+        # right-skewed (one 90-minute failure drags a mean the whole way up),
+        # and p90 is what actually matters for "will I make the change".
+        cur.execute("""
+            SELECT o.stop_sequence,
+                   MIN(s.name)                     AS station_name,
+                   MIN(s.display_name)             AS station_display,
+                   MIN(o.scheduled_arrival)        AS scheduled_arrival,
+                   MIN(o.scheduled_departure)      AS scheduled_departure,
+                   COUNT(*) FILTER (WHERE NOT o.is_cancelled)     AS observations,
+                   COUNT(DISTINCT o.observed_date)                AS days_seen,
+                   COUNT(*) FILTER (WHERE o.is_cancelled)         AS cancellations,
+                   COUNT(o.delay_arrival_minutes)                 AS n_arrival,
+                   ROUND(percentile_cont(0.5) WITHIN GROUP (
+                       ORDER BY o.delay_arrival_minutes)::numeric, 1)   AS median_arrival_delay,
+                   ROUND(percentile_cont(0.9) WITHIN GROUP (
+                       ORDER BY o.delay_arrival_minutes)::numeric, 1)   AS p90_arrival_delay,
+                   COUNT(o.delay_departure_minutes)               AS n_departure,
+                   ROUND(percentile_cont(0.5) WITHIN GROUP (
+                       ORDER BY o.delay_departure_minutes)::numeric, 1) AS median_departure_delay,
+                   ROUND(percentile_cont(0.9) WITHIN GROUP (
+                       ORDER BY o.delay_departure_minutes)::numeric, 1) AS p90_departure_delay,
+                   ROUND(AVG(o.delay_minutes)::numeric, 1)        AS avg_delay
+            FROM delay_observations o
+            JOIN stations s ON s.id = o.station_id
+            WHERE o.country_code = %s AND o.trip_id = %s
+              AND o.stop_sequence IS NOT NULL
+              AND o.observed_date >= CURRENT_DATE - %s::int
+            GROUP BY o.stop_sequence
+            ORDER BY o.stop_sequence
+        """, (country, trip_id, days))
+        stops = [dict(r) for r in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+    for s in stops:
+        s["sufficient_sample"] = (s.get("days_seen") or 0) >= _MIN_STOP_SAMPLE
+
+    return {
+        "country": country,
+        "train_id": train_id,
+        "days": days,
+        "identity_basis": basis,
+        # False for AT for a structural reason, not a data-volume one - see the
+        # block comment above. The frontend must not render an empty arrival
+        # column as "always on time".
+        "arrival_available": country != "AT",
+        "min_sample_days": _MIN_STOP_SAMPLE,
+        "sufficient_sample": any(s["sufficient_sample"] for s in stops),
+        "stops": stops,
+        "attribution": COUNTRY_ATTRIBUTION.get(country),
+    }
+
 @app.get("/train/{country}/{train_id:path}")
 def get_train(country: str, train_id: str):
     country = country.upper()
