@@ -890,6 +890,65 @@ def _attach_safer(cur, country, transfers, dest_name, service_date):
             print(f"safer_connectors failed at {t.get('station')}: {exc}")
             t["alternatives"] = []
 
+# --- Projecting where a running train ends up ---------------------------
+# A train that is late now will not simply stay that late. Measured on 64,095
+# fresh adjacent-stop segments, delay moves in a consistent direction that
+# depends on how late the train already is:
+#
+#     already      change per stop
+#     early           +0.340   (bleeds fastest - furthest from its padding)
+#     0-1 min         +0.096
+#     1-3 min         -0.158   <- flips here
+#     3-10 min        -0.201
+#     10-30 min       -0.199
+#     30+ min         -0.780
+#
+# So small delays compound and large ones are absorbed, which is timetable
+# padding doing its job: a late train has slack to reclaim, an on-time train
+# has none. Carrying the current delay forward unchanged - the obvious
+# projection - is therefore wrong in a predictable direction.
+#
+# GERMANY ONLY, and that is a data limit rather than a choice. Deriving a rate
+# needs the same train observed at CONSECUTIVE stops close together in time,
+# and HU, AT and PL have zero such segments: Poland records one stop per poll,
+# Austria resolves stop positions for a fifth of its trains, Hungary for under
+# half. Rather than borrow Germany's numbers for networks that may behave
+# nothing like it, the other three simply do not get a projection.
+_RECOVERY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recovery_rates.json")
+_RECOVERY_RATES = None
+
+
+def _recovery_rates(country):
+    global _RECOVERY_RATES
+    if _RECOVERY_RATES is None:
+        try:
+            with open(_RECOVERY_PATH) as fh:
+                _RECOVERY_RATES = json.load(fh)
+        except Exception:
+            _RECOVERY_RATES = {}
+    return _RECOVERY_RATES.get(country)
+
+
+def project_arrival_delay(country, current_delay, stops_remaining):
+    """Where this train probably ends up, given where it is now.
+
+    Applied stop by stop rather than multiplied out, because the rate depends
+    on the delay and the delay changes as it is applied - a train recovering
+    from 12 minutes crosses into a different band on the way down.
+    """
+    rates = _recovery_rates(country)
+    if rates is None or current_delay is None or not stops_remaining:
+        return None
+    bands = sorted((v[0], v[1], v[2]) for v in rates.values())
+    d = float(current_delay)
+    for _ in range(int(min(stops_remaining, 60))):
+        step = next((r for lo, hi, r in bands if lo <= d < hi), None)
+        if step is None:
+            break
+        d += step
+    return round(d, 1)
+
+
 # --- Journey reliability: which departure should I actually take? --------
 # The planner returns several itineraries and they are ordered by time, which
 # is the only thing a timetable knows. What a rider wants is which one is
@@ -3263,9 +3322,19 @@ def get_train(country: str, train_id: str):
         delay = stops[idx].get("delay_min")
 
     route_name = journey.get("route_name")
+    # Where this train probably ends up, not where it is. Carrying the current
+    # delay forward is the obvious answer and a measurably wrong one - see
+    # project_arrival_delay. None outside Germany, deliberately: the other
+    # three feeds do not observe consecutive stops often enough to derive a
+    # rate, and borrowing Germany's would be a guess dressed as a figure.
+    remaining = max(0, len(stops) - (idx or 0) - 1)
+    projected = project_arrival_delay(country, delay, remaining)
+    route_name = journey.get("route_name")
     return {
         "found": True,
         "country": country,
+        "projected_arrival_delay_min": projected,
+        "stops_remaining": remaining,
         "train_id": journey.get("train_id") or train_id,
         "train_number": journey.get("train_number") or "",
         "route_name": route_name,

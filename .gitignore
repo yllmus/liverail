@@ -34,6 +34,7 @@
 !station_names.py
 !import_hu_missing_stations.py
 !refresh_static_feeds.py
+!recovery_rates.json
 !tests/test_station_names.py
 !hu_route_names.py
 !tests/test_hu_route_names.py

@@ -606,3 +606,28 @@ def test_cancellation_scales_with_the_delay_it_caused():
     b = client.get("/compensation/check?country=HU&cancelled=true"
                    "&resulting_delay_minutes=140&ticket_price=40").json()
     assert b["refund_pct"] == 50.0 and b["estimated_refund"] == 20.0
+
+# --- Projected arrival delay -------------------------------------------
+
+def test_projection_absorbs_a_large_delay_and_compounds_a_small_one():
+    # Measured on 64,095 fresh adjacent-stop segments: delay under ~1 min
+    # grows, delay above it shrinks. Carrying the current figure forward - the
+    # obvious projection - is wrong in a predictable direction.
+    assert api.project_arrival_delay("DE", 20, 15) < 20      # recovers
+    assert api.project_arrival_delay("DE", 0, 15) > 0        # bleeds
+    assert api.project_arrival_delay("DE", -3, 15) > -3      # early trains lose most
+
+def test_projection_is_monotonic_in_stops_remaining():
+    a = api.project_arrival_delay("DE", 20, 3)
+    b = api.project_arrival_delay("DE", 20, 15)
+    assert b < a, "more stops should mean more recovery for a late train"
+
+def test_projection_is_absent_where_no_rate_could_be_derived():
+    # HU, AT and PL observe too few consecutive stops to derive a rate.
+    # Borrowing Germany's would be a guess dressed as a figure.
+    for c in ("HU", "AT", "PL"):
+        assert api.project_arrival_delay(c, 10, 10) is None
+
+def test_projection_needs_a_delay_and_somewhere_left_to_go():
+    assert api.project_arrival_delay("DE", None, 10) is None
+    assert api.project_arrival_delay("DE", 10, 0) is None
