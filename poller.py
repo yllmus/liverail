@@ -159,6 +159,7 @@ def poll():
     print(f"Got {len(rows)} vehicles")
     count = 0
     resolved_count = 0
+    unresolved_station = 0
     for row in rows:
         state = "CANCELLED" if row["is_cancelled"] else row["delay_minutes"]
         print(f"  {row['route_name']} at {row['stop_name']}: {state}")
@@ -194,11 +195,22 @@ def poll():
             row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
             row["stop_name"], COUNTRY_CODE,
         ))
-        count += 1
+        # cur.rowcount, not an unconditional increment. The INSERT is a
+        # SELECT against `stations`, so an unknown station name inserts NOTHING
+        # and the old count still claimed it as saved. That is how 7.8% of
+        # Hungarian observations - every HEV line, H5 through H9 - were parsed,
+        # discarded and reported as written, for as long as HU has been
+        # running. Counting what the database actually accepted is the only
+        # version of this number worth printing.
+        if cur.rowcount:
+            count += 1
+        else:
+            unresolved_station += 1
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Saved {count} observations, {resolved_count} with a resolved trip_id.")
+    print(f"Saved {count} observations, {resolved_count} with a resolved trip_id, "
+          f"{unresolved_station} dropped for an unknown station.")
 
 if __name__ == "__main__":
     poll()

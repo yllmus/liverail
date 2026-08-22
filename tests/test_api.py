@@ -369,18 +369,16 @@ def test_distribution_falls_back_when_the_route_is_unknown():
 # --- Phase 3: journey planning ----------------------------------------
 
 def test_plan_is_501_for_countries_without_a_planner():
-    # Germany alone now. HU borrows MÁV's OTP, AT borrows ÖBB's HAFAS, and PL
-    # is planned from our own imported timetable by a connection scan. DE's
-    # HAFAS is shut down AND its poller samples too few stops per trip to
-    # support the search, so it is the one country still without one.
-    # Not 404 and not an empty result: the capability genuinely does not
-    # exist, and the response says why rather than implying no route exists.
-    for c in ("DE",):
-        r = client.get(f"/plan?country={c}&origin=A&destination=B")
-        assert r.status_code == 501
-        # Must explain what is actually missing, not just refuse. A bare 501
-        # would read as a temporary outage rather than an unbuilt capability.
-        assert "connection-scan" in r.json()["detail"].lower()
+    # Every country can plan now. HU borrows MÁV's OTP, AT borrows ÖBB's
+    # HAFAS, and PL and DE are searched over our own imported timetable.
+    # Germany was the last holdout, blocked on two things that are now fixed:
+    # its calendar had never been imported (service_calendar held zero DE
+    # rows, so no service counted as running) and its poller sampled too few
+    # stops per trip to search over. Kept as a test so an unknown country
+    # still refuses with an explanation rather than an empty itinerary list.
+    r = client.get("/plan?country=ZZ&origin=A&destination=B")
+    assert r.status_code == 501
+    assert "connection-scan" in r.json()["detail"].lower()
 
 def test_plan_requires_both_endpoints():
     assert client.get("/plan?country=HU&origin=Budapest-Keleti").status_code == 400
@@ -447,7 +445,7 @@ def test_plan_supports_every_registered_planner_country():
     # a country in it must not return 501.
     # INT is in the registry too, but it is not a country - it selects the
     # cross-border planner rather than a national one.
-    assert set(api._PLAN_PROVIDERS) == {"HU", "AT", "PL", "INT"}
+    assert set(api._PLAN_PROVIDERS) == {"HU", "AT", "PL", "DE", "INT"}
     for c in api._PLAN_PROVIDERS:
         assert client.get(f"/plan?country={c}&origin=X").status_code != 501
 

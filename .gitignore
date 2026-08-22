@@ -32,6 +32,7 @@
 !germany_poller.py
 !tests/test_de_poller.py
 !station_names.py
+!import_hu_missing_stations.py
 !tests/test_station_names.py
 !hu_route_names.py
 !tests/test_hu_route_names.py

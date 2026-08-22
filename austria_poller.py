@@ -16,6 +16,9 @@ DB_CONFIG = {
 }
 
 COUNTRY_CODE = "AT"
+# Urban transit that HAFAS reports as mode "train". Excluded from a rail
+# tracker - see parse_at_vehicles for the measurement behind this.
+EXCLUDED_PRODUCTS = {"tram", "subway"}
 
 def station_name_candidates(name):
     # ÖBB's live HAFAS names and its own static GTFS station names disagree
@@ -29,10 +32,36 @@ def station_name_candidates(name):
     stripped = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
     if stripped != name:
         candidates.append(stripped)
-    for base in (name, stripped):
+    # HAFAS omits the space after an abbreviating dot that the static feed
+    # keeps: "St.Pölten Hbf" against "St. Pölten Hauptbahnhof". NOTES.md
+    # logged this as a known unhandled case; it was worth 7 dropped
+    # observations in a single poll. Generalised rather than special-cased on
+    # "St." - the same shape appears in "Kl.", "Gr.", "Bhf." and others.
+    spaced = re.sub(r"\.(?=\S)", ". ", name).strip()
+    bases = [name, stripped]
+    if spaced not in bases:
+        bases.append(spaced)
+        stripped_spaced = re.sub(r"\s*\([^)]*\)\s*$", "", spaced).strip()
+        if stripped_spaced not in bases:
+            bases.append(stripped_spaced)
+    for base in bases:
+        # The base itself is a candidate, not only the variants derived from
+        # it. Without this the respaced form was generated and then never
+        # tried: "St.Valentin Bahnhof" produced "St. Valentin" but not
+        # "St. Valentin Bahnhof", which is exactly what the static feed calls
+        # it, so the observation was dropped anyway.
+        candidates.append(base)
         if base.endswith(" Hbf"):
             candidates.append(base[: -len(" Hbf")] + " Hauptbahnhof")
+        # Bahnhst (Bahnhaltestelle) and Bahnhof are used interchangeably
+        # between the live feed and the static export for the same stop -
+        # HAFAS says "Schrambach Bahnhst", the feed says "Schrambach Bahnhof".
+        # Try the suffix removed, and each spelling swapped for the other.
         candidates.append(re.sub(r"\s+(Bahnhof|Bahnhst)$", "", base))
+        if base.endswith(" Bahnhst"):
+            candidates.append(base[: -len(" Bahnhst")] + " Bahnhof")
+        elif base.endswith(" Bahnhof"):
+            candidates.append(base[: -len(" Bahnhof")] + " Bahnhst")
     # dedupe while preserving priority order (exact match first)
     seen = set()
     result = []
@@ -132,6 +161,22 @@ def parse_at_vehicles(movements):
     for m in movements or []:
         line = m.get("line") or {}
         if line.get("mode") != "train":
+            continue
+        # HAFAS labels Vienna's street trams and the U-Bahn as mode "train",
+        # separated from actual rail only by `product`. This project used to
+        # keep them deliberately (see NOTES.md) on the grounds that genuine
+        # tram-trains are labelled identically and could not be separated.
+        # Measured on 2026-08-22, that trade was a bad one: 264 tram rows per
+        # poll, of which only 29 resolved to any station at all, because
+        # OBB's rail GTFS contains no tram stops - 0 of its 1,173 stations
+        # have "Schleife" or "Strassenbahn" in the name. The rest were parsed,
+        # queried against `stations`, and thrown away every five minutes.
+        #
+        # The cost of excluding them is those 29 - some of which will be real
+        # Linz tram-train services. That is a scope decision, made explicitly:
+        # this is a train delay tracker, and a rider looking up a delayed
+        # train is not looking for the 43 to Schottentor.
+        if line.get("product") in EXCLUDED_PRODUCTS:
             continue
         route_name = line.get("name")
         stopovers = m.get("nextStopovers") or []
@@ -266,6 +311,7 @@ def poll():
     count = 0
     resolved_count = 0
     skipped = 0
+    unresolved_station = 0
     unknown = 0
     for row in rows:
         # A train OBB has published no delay for is kept in the live feed -
@@ -315,12 +361,21 @@ def poll():
             row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
             candidates, COUNTRY_CODE, candidates,
         ))
-        count += 1
+        # Same reasoning as poller.py: this INSERT is a SELECT against
+        # `stations`, so an unmatched name writes nothing while an
+        # unconditional counter still reports it as saved. AT resolves names
+        # through station_name_candidates(), which covers a lot, but the
+        # remaining misses are real and were invisible.
+        if cur.rowcount:
+            count += 1
+        else:
+            unresolved_station += 1
     conn.commit()
     cur.close()
     conn.close()
     print(f"Saved {count} observations, {resolved_count} with a resolved trip_id, "
-          f"skipped {skipped} unchanged and {unknown} with no delay published.")
+          f"skipped {skipped} unchanged, {unknown} with no delay published, "
+          f"{unresolved_station} dropped for an unknown station.")
 
 if __name__ == "__main__":
     poll()

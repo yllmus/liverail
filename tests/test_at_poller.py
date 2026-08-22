@@ -163,3 +163,46 @@ def test_hafas_journey_id_survives_the_changing_timestamp():
     assert hafas_journey_id(a) == hafas_journey_id(b) == "82533"
     assert hafas_journey_id(None) is None
     assert hafas_journey_id("nonsense") is None
+
+
+def test_parse_at_vehicles_excludes_trams_and_subway():
+    # HAFAS labels Vienna's street trams and U-Bahn as mode "train",
+    # distinguished only by `product`. 264 tram rows per poll, of which 29
+    # resolved to any station - OBB's rail GTFS has no tram stops at all.
+    movements = [{
+        "tripId": "2|#VN#1#ST#1#PI#0#ZI#1#TA#0#DA#220826#",
+        "line": {"name": "43", "mode": "train", "product": product},
+        "direction": "Schottentor",
+        "location": {"latitude": 48.2, "longitude": 16.35},
+        "nextStopovers": [{"stop": {"name": "Wien Schottentor (Tiefgeschoß)"},
+                           "departureDelay": 60}],
+    } for product in ("tram", "subway")]
+    assert parse_at_vehicles(movements) == []
+
+
+def test_parse_at_vehicles_keeps_real_rail_products():
+    movements = [{
+        "tripId": "2|#VN#1#ST#1#PI#0#ZI#2#TA#0#DA#220826#",
+        "line": {"name": "RJ 61", "mode": "train", "product": product},
+        "direction": "Wien Hbf",
+        "location": {"latitude": 48.2, "longitude": 16.35},
+        "nextStopovers": [{"stop": {"name": "Wien Meidling"}, "departureDelay": 60}],
+    } for product in ("national", "regional", "suburban", "nationalExpress")]
+    assert len(parse_at_vehicles(movements)) == 4
+
+
+def test_station_name_candidates_handles_missing_space_after_abbreviation():
+    # HAFAS writes "St.Pölten Hbf"; the static feed has "St. Pölten
+    # Hauptbahnhof". Both the respaced base AND its Hbf expansion must be
+    # offered - generating one without the other still drops the observation.
+    c = station_name_candidates("St.Pölten Hbf")
+    assert "St. Pölten Hauptbahnhof" in c
+    c2 = station_name_candidates("St.Valentin Bahnhof")
+    assert "St. Valentin Bahnhof" in c2
+
+
+def test_station_name_candidates_swaps_bahnhst_and_bahnhof():
+    # The two are used interchangeably for the same stop between the live feed
+    # and the static export.
+    assert "Schrambach Bahnhof" in station_name_candidates("Schrambach Bahnhst")
+    assert "Schrambach Bahnhst" in station_name_candidates("Schrambach Bahnhof")

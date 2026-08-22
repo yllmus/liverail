@@ -910,7 +910,8 @@ def _normalise_plan_at(raw, country, cur):
         })
     return out
 
-def _normalise_plan_pl(cur, origin_id, destination_id, service_date, from_sec, n):
+def _normalise_plan_pl(cur, origin_id, destination_id, service_date, from_sec, n,
+                       country="PL"):
     """Poland: search our own imported timetable, then emit the shared shape.
 
     The only country of the four planned from data we hold rather than an
@@ -923,7 +924,7 @@ def _normalise_plan_pl(cur, origin_id, destination_id, service_date, from_sec, n
     of an earliest-arrival search: the connection list is loaded once and every
     extra scan is a few hundredths of a second over it.
     """
-    conns = pl_planner.load_connections(cur, "PL", service_date, from_sec)
+    conns = pl_planner.load_connections(cur, country, service_date, from_sec)
     seen, itineraries, cursor_sec = set(), [], from_sec
     for _ in range(n):
         chain = pl_planner.scan(conns, origin_id, destination_id, cursor_sec)
@@ -970,7 +971,7 @@ def _normalise_plan_pl(cur, origin_id, destination_id, service_date, from_sec, n
                 "connector_route": b["route_name"], "connector_number": b.get("trip_short_name"),
                 "_arrive_hm": pl_planner.seconds_to_hm(a["arrive_sec"]),
                 "_depart_hm": pl_planner.seconds_to_hm(b["depart_sec"]),
-                "risk": assess_transfer(cur, "PL", station_name, buffer_min,
+                "risk": assess_transfer(cur, country, station_name, buffer_min,
                                         a["route_name"], b["route_name"]),
             })
         itineraries.append({
@@ -998,7 +999,7 @@ def _parse_iso(v):
 # that the endpoint takes one; what it really selects is "plan this with ÖBB's
 # HAFAS and resolve every station against all four countries at once".
 _PLAN_PROVIDERS = {"HU": "mav-otp", "AT": "oebb-hafas", "PL": "csa-timetable",
-                   "INT": "oebb-hafas-international"}
+                   "DE": "csa-timetable", "INT": "oebb-hafas-international"}
 
 def _plan_international(cur, origin, destination, date, time_, n):
     """Cross-border journeys, planned by ÖBB's HAFAS.
@@ -1159,10 +1160,17 @@ def get_plan(country: str = "HU", origin: str = "", destination: str = "",
             cached = _PLAN_CACHE.get(key)
             if cached and time.time() < cached["expires"]:
                 return cached["data"]
-            if country == "PL":
+            if country in ("PL", "DE"):
+                # Both planned by connection scan over our own imported
+                # timetable, because neither has a planner to borrow: DB's
+                # HAFAS is shut down and mkuran.pl is a data mirror. Germany
+                # was blocked on two things until now - its calendar was never
+                # imported (service_calendar held 0 DE rows, so no service ever
+                # counted as running) and its poller sampled too few stops per
+                # trip to search over. Both fixed.
                 itineraries = _normalise_plan_pl(
                     cur, frm[0], to[0], datetime.strptime(date, "%Y-%m-%d").date(),
-                    pl_planner.hms_to_seconds(time_ + ":00"), n)
+                    pl_planner.hms_to_seconds(time_ + ":00"), n, country)
             elif country == "AT":
                 dep_iso = f"{date}T{time_}:00"
                 # ÖBB resolves by its own station names, so pass the names we
