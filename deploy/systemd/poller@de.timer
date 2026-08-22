@@ -1,0 +1,10 @@
+[Unit]
+Description=Run DE (DB) poller every 5 minutes
+
+[Timer]
+OnActiveSec=390
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

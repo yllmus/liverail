@@ -1,0 +1,14 @@
+/home/ubuntu/hu_poller.log
+/home/ubuntu/at_poller.log
+/home/ubuntu/pl_poller.log
+/home/ubuntu/de_poller.log
+{
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su root root
+}

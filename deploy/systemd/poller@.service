@@ -1,0 +1,12 @@
+[Unit]
+Description=%i delay poller
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+EnvironmentFile=/etc/poller-instances/%i.conf
+ExecStart=/usr/bin/python3 /home/ubuntu/${POLLER_SCRIPT}
+StandardOutput=append:/home/ubuntu/%i_poller.log
+StandardError=append:/home/ubuntu/%i_poller.log

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run PL (PKP) poller every 5 minutes
+
+[Timer]
+OnActiveSec=270
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

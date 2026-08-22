@@ -1,0 +1,10 @@
+[Unit]
+Description=Run AT (ÖBB) poller every 5 minutes
+
+[Timer]
+OnActiveSec=150
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

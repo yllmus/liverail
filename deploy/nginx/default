@@ -1,0 +1,25 @@
+server {
+	listen 80 default_server;
+	listen [::]:80 default_server;
+
+	root /var/www/html;
+	index index.html index.htm index.nginx-debian.html;
+	server_name _;
+
+	# Train delay tracker (trainapi.service, uvicorn on 8000): same-origin
+	# proxy so the frontend never has to hardcode this box's public IP.
+	location ~ ^/(search|countries|stations|routes|station|route|train/|operators|heatmap|trend|live|t/|sitemap\.xml|robots\.txt|compensation/|out/|partner-links|health) {
+		limit_req zone=trainapi_general burst=40 nodelay;
+		proxy_pass http://127.0.0.1:8000;
+		proxy_set_header Host $host;
+		proxy_set_header X-Real-IP $remote_addr;
+		# sitemap.xml can hit a cold routes_list cache across all 4 countries -
+		# same disk-bound whole-table-scan cost as /routes/Compare (see
+		# NOTES.md); default 60s isn't always enough for that first miss.
+		proxy_read_timeout 120s;
+	}
+
+	location / {
+		try_files $uri $uri/ =404;
+	}
+}
