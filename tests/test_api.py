@@ -393,3 +393,46 @@ def test_plan_404s_on_an_unknown_station():
 def test_plan_rejects_identical_endpoints():
     r = client.get("/plan?country=HU&origin=Debrecen&destination=Debrecen")
     assert r.status_code == 400
+
+# --- Phase 4: transfer probability ------------------------------------
+
+def test_transfer_risk_requires_a_station():
+    assert client.get("/transfer/risk?country=AT").status_code == 400
+
+def test_transfer_risk_refuses_when_no_rung_is_deep_enough():
+    # Suppressed entirely rather than computed from the connector alone: the
+    # feeder's delay is what decides a transfer, and a figure missing it would
+    # be a guess wearing a number.
+    b = client.get("/transfer/risk?country=AT&station=Wien Quartier Belvedere"
+                   "&buffer_min=10&min_sample=999999999").json()
+    assert b["assessed"] is False
+    assert b["reason"]
+
+def test_transfer_risk_always_flags_the_interchange_assumption():
+    # No feed publishes a minimum interchange time for AT, so the figure used
+    # is a default. It must never be presented as measured.
+    b = client.get("/transfer/risk?country=AT&station=Wien Quartier Belvedere"
+                   "&buffer_min=10").json()
+    if b["assessed"]:
+        assert b["interchange_is_assumption"] is True
+        assert b["interchange_note"]
+
+def test_transfer_risk_is_monotonic_in_the_buffer():
+    # More slack can never make a connection less likely. This caught a real
+    # modelling bug: `worst` was being treated as the 100th percentile, which
+    # pinned every buffer from 8 to 40 minutes at the same probability.
+    ps = []
+    for buf in (2, 4, 6, 8, 20):
+        b = client.get("/transfer/risk?country=AT&station=Wien Quartier Belvedere"
+                       f"&buffer_min={buf}").json()
+        if b["assessed"] and b["probability"] is not None:
+            ps.append(b["probability"])
+    assert ps == sorted(ps)
+    assert ps and ps[0] < ps[-1]
+
+def test_transfer_risk_never_claims_better_than_the_modelled_tail():
+    b = client.get("/transfer/risk?country=AT&station=Wien Quartier Belvedere"
+                   "&buffer_min=600").json()
+    if b["assessed"]:
+        assert b["probability"] <= 0.95
+        assert b["tail_unmodelled_above_pct"] == 95

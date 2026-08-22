@@ -405,9 +405,11 @@ def _normalise_plan(raw, country, cur):
                 "buffer_min": buffer_min,
                 "feeder_route": a["route_name"], "feeder_number": a["train_number"],
                 "connector_route": b["route_name"], "connector_number": b["train_number"],
-                # Phase 4 fills this. Stated as unknown rather than omitted so
-                # a consumer cannot mistake "not computed" for "no risk".
-                "risk": None,
+                # Phase 4. Filled per transfer from the stored distributions;
+                # carries its own refusal when no rung is deep enough, so a
+                # consumer can never mistake "not computed" for "no risk".
+                "risk": assess_transfer(cur, country, a["to"], buffer_min,
+                                        a["route_name"], b["route_name"]),
             })
         start = _epoch_ms_to_local(it.get("startTime"), country)
         end = _epoch_ms_to_local(it.get("endTime"), country)
@@ -422,6 +424,211 @@ def _normalise_plan(raw, country, cur):
             "transfers": transfers,
         })
     return out
+
+# --- Phase 4: transfer probability ------------------------------------
+# P(make it) = P(feeder delay - connector departure delay <= buffer - MCT).
+#
+# TWO SIMPLIFICATIONS, both the ones the whole industry makes and both stated
+# rather than buried: the feeder and connector delays are treated as
+# independent (they are not - one storm delays both - but the correlation is
+# second-order), and a train's delay at a station is read as its delay there.
+#
+# THE DISTRIBUTIONS ARE RECONSTRUCTED FROM STORED QUANTILES, not from raw
+# rows. schema/012 holds p50/p75/p90/p95/worst, so the curve is sampled at
+# those points and interpolated between them. Below p50 it is held flat: the
+# lower tail is not stored, and assuming a train is *at best* its median is
+# the conservative direction - it never inflates the chance of making a
+# connection. This is an approximation of a convolution, at the resolution the
+# stored data actually supports, and it is labelled as one.
+#
+# MINIMUM INTERCHANGE TIME HAS NO SOURCE for three of the four countries -
+# checked directly: transfers.txt is absent from MÁV's, ÖBB's and both gtfs.de
+# feeds. Only PL publishes one and it was skipped at import. So the figure
+# below is an ASSUMPTION, is returned as one, and is deliberately not dressed
+# up as data. AT ships pathways.txt, which could yield real walking times for
+# that country alone; PL's transfers.txt could be imported. Both are follow-on
+# work, not guesses to make here.
+_MCT_DEFAULT_MIN = 5
+_MCT_LARGE_STATION_MIN = 10
+# Above this many recorded observations a station is treated as "large" and
+# given the longer interchange. A proxy for platform count, which no feed
+# publishes - crude, and labelled as such in the response.
+_MCT_LARGE_STATION_OBS = 100000
+
+def _interchange_minutes(station_samples):
+    return (_MCT_LARGE_STATION_MIN if (station_samples or 0) >= _MCT_LARGE_STATION_OBS
+            else _MCT_DEFAULT_MIN)
+
+def _quantile_curve(row_map):
+    """(quantile, delay) points from a stored distribution row, ascending."""
+    # `worst` is deliberately NOT a point on this curve. It is a maximum, not
+    # a percentile: at one AT station it is 106 minutes out of 14,175
+    # observations, i.e. a 1-in-14,175 event. Treating it as the 100th
+    # percentile and interpolating from p95 handed roughly 4% of the
+    # probability mass to near-worst delays, which pinned every buffer from 8
+    # to 40 minutes at the same 0.96 - visibly wrong, since a 40-minute buffer
+    # is plainly safer than an 8-minute one.
+    #
+    # The curve therefore stops at p95 and is held flat above it. That leaves
+    # the top 5% unmodelled rather than modelled badly, so the probability is
+    # capped and reported as such instead of being quietly optimistic.
+    pts = []
+    for q, key in ((0.50, "p50"), (0.75, "p75"), (0.90, "p90"), (0.95, "p95")):
+        v = row_map.get(key)
+        if v is not None:
+            pts.append((q, float(v)))
+    return pts
+
+def _sample_at(pts, u):
+    """Inverse CDF at u in [0,1), by linear interpolation between quantiles.
+
+    Held flat below the lowest stored quantile (p50) - see the block comment:
+    the lower tail is not stored and assuming the median is the conservative
+    direction.
+    """
+    if not pts:
+        return None
+    if u <= pts[0][0]:
+        return pts[0][1]
+    for (q0, v0), (q1, v1) in zip(pts, pts[1:]):
+        if u <= q1:
+            if q1 == q0:
+                return v1
+            return v0 + (v1 - v0) * (u - q0) / (q1 - q0)
+    return pts[-1][1]
+
+_RISK_GRID = 24  # 24x24 = 576 pairs; finer than the stored quantiles justify
+
+def _transfer_probability(feeder, connector, buffer_min, mct_min):
+    """Grid convolution of two reconstructed curves. None if either is absent."""
+    fpts = _quantile_curve(feeder) if feeder else []
+    if not fpts:
+        return None
+    cpts = _quantile_curve(connector) if connector else []
+    slack = (buffer_min or 0) - mct_min
+    made = 0
+    total = 0
+    for i in range(_RISK_GRID):
+        fu = (i + 0.5) / _RISK_GRID
+        fd = _sample_at(fpts, fu)
+        if cpts:
+            for j in range(_RISK_GRID):
+                cu = (j + 0.5) / _RISK_GRID
+                cd = _sample_at(cpts, cu)
+                total += 1
+                if fd - cd <= slack:
+                    made += 1
+        else:
+            # No distribution for the connector: assume it leaves on time,
+            # which is the conservative reading - a late connector only ever
+            # helps the passenger.
+            total += 1
+            if fd <= slack:
+                made += 1
+    if not total:
+        return None
+    # Capped: the curve stops at p95, so the top 5% of outcomes are unknown
+    # rather than known-good. Never claim better than 0.95.
+    return min(made / total, 0.95)
+
+# Words, not a false-precision percentage. The study is explicit: "Tight" and
+# "comfortable" are more honest than "68%" when the input is three weeks of
+# data. The probability is still returned for callers that want it, but the
+# label is what a page should lead with.
+def _risk_label(p):
+    if p is None:
+        return None
+    if p >= 0.95:
+        return "comfortable"
+    if p >= 0.80:
+        return "usually fine"
+    if p >= 0.55:
+        return "tight"
+    return "unlikely"
+
+def _dist_row_map(row):
+    if not row:
+        return None
+    keys = ("basis", "basis_key", "sample_count", "days_seen", "p50", "p75", "p90", "p95",
+            "worst", "arr_p50", "arr_p90", "dep_p50", "dep_p90", "arr_samples",
+            "dep_samples", "cancellation_rate")
+    return dict(zip(keys, row))
+
+def assess_transfer(cur, country, station_name, buffer_min,
+                    feeder_route=None, connector_route=None, min_sample=None):
+    """Risk for one transfer, or an explicit refusal with the reason."""
+    cur.execute("""SELECT id, COALESCE(display_name, name) FROM stations
+                   WHERE country_code = %s AND name = %s LIMIT 1""", (country, station_name))
+    srow = cur.fetchone()
+    if not srow:
+        return {"assessed": False, "reason": f"No station {station_name!r} on record."}
+    station_id, station_display = srow
+
+    feeder = _dist_row_map(lookup_delay_distribution(
+        cur, country, station_id, None, feeder_route, min_sample))
+    connector = _dist_row_map(lookup_delay_distribution(
+        cur, country, station_id, None, connector_route, min_sample))
+
+    # The station rung doubles as the size proxy for interchange time.
+    station_all = _dist_row_map(lookup_delay_distribution(cur, country, station_id, None, None, 1))
+    mct = _interchange_minutes(station_all.get("sample_count") if station_all else 0)
+
+    if not feeder:
+        # Suppressed entirely rather than computed from the connector alone:
+        # the feeder's delay is the term that decides this, and a figure
+        # missing it would be a guess wearing a number.
+        return {"assessed": False, "station": station_name, "station_display": station_display,
+                "buffer_min": buffer_min, "interchange_min": mct,
+                "reason": ("No delay distribution deep enough for the arriving train at this "
+                           "station yet. Stop-level history began on 21 August 2026.")}
+
+    p = _transfer_probability(feeder, connector, buffer_min, mct)
+    return {
+        "assessed": True,
+        "station": station_name,
+        "station_display": station_display,
+        "buffer_min": buffer_min,
+        # Flagged as an assumption every time it is returned, because it is one.
+        "interchange_min": mct,
+        "interchange_is_assumption": True,
+        "interchange_note": ("No feed publishes a minimum interchange time for this country "
+                             "(transfers.txt is absent from MÁV's, ÖBB's and both gtfs.de "
+                             "feeds), so this is a documented default, not measured data."),
+        "probability": round(p, 3) if p is not None else None,
+        "label": _risk_label(p),
+        # The stored curve stops at p95, so nothing above that is modelled and
+        # the probability can never read better than 0.95. Said out loud so a
+        # ceiling is not mistaken for a certainty.
+        "tail_unmodelled_above_pct": 95,
+        # Provenance on both sides: which ladder rung answered and how deep it
+        # was. A risk figure without these is not checkable.
+        "feeder_basis": feeder.get("basis"), "feeder_samples": feeder.get("sample_count"),
+        "feeder_days": feeder.get("days_seen"), "feeder_p50": feeder.get("p50"),
+        "feeder_p90": feeder.get("p90"),
+        "connector_basis": connector.get("basis") if connector else None,
+        "connector_samples": connector.get("sample_count") if connector else None,
+        "connector_assumed_on_time": connector is None,
+        "cancellation_rate": feeder.get("cancellation_rate"),
+    }
+
+@app.get("/transfer/risk")
+def get_transfer_risk(country: str = "HU", station: str = "", buffer_min: float = 0,
+                      feeder_route: str = "", connector_route: str = "",
+                      min_sample: int = None):
+    """Odds of making one transfer. Phase 4."""
+    country = country.upper()
+    if not station:
+        raise HTTPException(status_code=400, detail="station is required")
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        result = assess_transfer(cur, country, station, buffer_min,
+                                 feeder_route or None, connector_route or None, min_sample)
+    finally:
+        cur.close()
+        conn.close()
+    result["country"] = country
+    return result
 
 @app.get("/plan")
 def get_plan(country: str = "HU", origin: str = "", destination: str = "",
