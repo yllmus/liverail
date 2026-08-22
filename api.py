@@ -6,6 +6,7 @@ from urllib.parse import quote as _urlquote
 import json
 import os
 import psycopg2
+import re
 import psycopg2.extras
 import requests as req
 import threading
@@ -557,8 +558,88 @@ def _dist_row_map(row):
             "dep_samples", "cancellation_rate")
     return dict(zip(keys, row))
 
+def resolve_station_anywhere(cur, name):
+    """Find a station in ANY country, preferring whichever holds real history.
+
+    Cross-border journeys make this necessary and make the obvious approaches
+    wrong, both measured rather than assumed:
+
+      * A foreign terminus appears in several feeds. "Budapest-Keleti" exists
+        in AT's, DE's and HU's imports, and only HU's carries its 163,068
+        observations - so first-match resolution is a coin flip that usually
+        loses.
+      * The nominally correct country is often not the best one. "Salzburg
+        Hbf" matches only DE by exact name, yet Salzburg is Austrian and AT
+        holds it as "Salzburg Hauptbahnhof" with 43,160 observations. And AT
+        genuinely holds MORE observations at Muenchen Hbf than DE does
+        (74,300 vs 12,026), because OeBB's radar covers international services
+        calling there. Depth is a better guide than nationality.
+
+    So: expand the name through the same candidate list AT's poller uses (which
+    strips HAFAS's parenthetical platform qualifiers and reconciles
+    Hbf/Hauptbahnhof), then rank every match across all four countries by how
+    many observations that station actually has.
+
+    Returns (country, station_id, name, display_name, observations) or None.
+    """
+    # HAFAS appends platform groups in two shapes and only one is
+    # parenthesised: "Wien Hbf (Bahnsteige 3-12)" the poller's helper already
+    # strips, but "München Hbf Gl.5-10" it does not - and that one appeared on
+    # the very first cross-border journey tested. Strip the bare form too,
+    # here rather than in station_name_candidates(), which four pollers depend
+    # on and which should not change shape for a planner's benefit.
+    bare = re.sub(r"\s+(Gl\.|Gleis|Bstg\.?|Bahnsteige?)\s*[\d\s,\-–/]*$", "", name).strip()
+    candidates = at_station_name_candidates(name)
+    if bare and bare != name:
+        for extra in at_station_name_candidates(bare):
+            if extra not in candidates:
+                candidates.append(extra)
+    cur.execute("""
+        SELECT s.country_code, s.id, s.name, COALESCE(s.display_name, s.name),
+               COALESCE(d.sample_count, 0) AS obs
+        FROM stations s
+        LEFT JOIN delay_distribution d
+          ON d.station_id = s.id AND d.scope = 'station'
+         AND d.country_code = s.country_code
+        WHERE s.name = ANY(%s)
+        ORDER BY obs DESC, array_position(%s, s.name)
+        LIMIT 1
+    """, (candidates, candidates))
+    exact = cur.fetchone()
+    # NOT "return exact if exact" - an exact match can be the worst answer
+    # available. DE's import contains a station literally named "Bohumin",
+    # ASCII and with zero observations, while PL holds the same station as
+    # "Bohumín" with 19,244. Taking the exact hit blocked the good one and
+    # reported "no data" for a station we have thousands of records for. Both
+    # routes are tried and depth decides.
+    #
+    # Fall back to the folded form. HAFAS returns ASCII-stripped names for
+    # stations outside Austria - "Bohumin" for "Bohumín", "Krakow" for
+    # "Kraków" - so an exact match cannot find them however many spelling
+    # variants it tries. search_index already stores exactly this folding for
+    # the typo-tolerant search, trigram-indexed, with an observation count to
+    # rank by: PL's Bohumín folds to "bohumin" and carries 19,244
+    # observations, while AT's and DE's copies of the same station carry none.
+    folded = normalize_search_text(name)
+    if not folded:
+        return exact
+    cur.execute("""
+        SELECT s.country_code, s.id, s.name, COALESCE(s.display_name, s.name),
+               si.observations
+        FROM search_index si
+        JOIN stations s ON s.country_code = si.country_code AND s.name = si.name
+        WHERE si.kind = 'station' AND si.search_text LIKE %s
+        ORDER BY si.observations DESC
+        LIMIT 1
+    """, (folded + "%",))
+    fuzzy = cur.fetchone()
+    if exact and fuzzy:
+        return exact if (exact[4] or 0) >= (fuzzy[4] or 0) else fuzzy
+    return exact or fuzzy
+
 def assess_transfer(cur, country, station_name, buffer_min,
-                    feeder_route=None, connector_route=None, min_sample=None):
+                    feeder_route=None, connector_route=None, min_sample=None,
+                    resolved=None):
     """Risk for one transfer, or an explicit refusal with the reason."""
     # AT's HAFAS names and its own GTFS names disagree on formatting for a
     # real chunk of stations - "Wörgl Hbf" vs "Wörgl Hauptbahnhof", trailing
@@ -567,15 +648,19 @@ def assess_transfer(cur, country, station_name, buffer_min,
     # resolved to no station at all under an exact match. The poller already
     # solves this with station_name_candidates(); the same list is used here so
     # a transfer is not silently unassessable for a station we do hold.
-    names = at_station_name_candidates(station_name) if country == "AT" else [station_name]
-    cur.execute("""SELECT id, COALESCE(display_name, name) FROM stations
-                   WHERE country_code = %s AND name = ANY(%s)
-                   ORDER BY array_position(%s, name) LIMIT 1""",
-                (country, names, names))
-    srow = cur.fetchone()
-    if not srow:
-        return {"assessed": False, "reason": f"No station {station_name!r} on record."}
-    station_id, station_display = srow
+    if resolved is not None:
+        country, station_id, _n, station_display = (
+            resolved[0], resolved[1], resolved[2], resolved[3])
+    else:
+        names = at_station_name_candidates(station_name) if country == "AT" else [station_name]
+        cur.execute("""SELECT id, COALESCE(display_name, name) FROM stations
+                       WHERE country_code = %s AND name = ANY(%s)
+                       ORDER BY array_position(%s, name) LIMIT 1""",
+                    (country, names, names))
+        srow = cur.fetchone()
+        if not srow:
+            return {"assessed": False, "reason": f"No station {station_name!r} on record."}
+        station_id, station_display = srow
 
     feeder = _dist_row_map(lookup_delay_distribution(
         cur, country, station_id, None, feeder_route, min_sample))
@@ -599,6 +684,11 @@ def assess_transfer(cur, country, station_name, buffer_min,
     return {
         "assessed": True,
         "station": station_name,
+        # Which country's records answered. On a cross-border journey this is
+        # not always the country the station sits in - see
+        # resolve_station_anywhere - and a rider deserves to know whose data
+        # this is rather than have it implied by the itinerary.
+        "data_country": country,
         "station_display": station_display,
         "buffer_min": buffer_min,
         # Flagged as an assumption every time it is returned, because it is one.
@@ -889,7 +979,116 @@ def _parse_iso(v):
 # Which countries can plan at all, and how. A registry rather than an if/elif
 # chain for the same reason _LIVE_PROVIDERS is one: adding a country should be
 # an entry, not another copy of the surrounding plumbing.
-_PLAN_PROVIDERS = {"HU": "mav-otp", "AT": "oebb-hafas", "PL": "csa-timetable"}
+# "INT" is the cross-border planner. It is a country code only in the sense
+# that the endpoint takes one; what it really selects is "plan this with ÖBB's
+# HAFAS and resolve every station against all four countries at once".
+_PLAN_PROVIDERS = {"HU": "mav-otp", "AT": "oebb-hafas", "PL": "csa-timetable",
+                   "INT": "oebb-hafas-international"}
+
+def _plan_international(cur, origin, destination, date, time_, n):
+    """Cross-border journeys, planned by ÖBB's HAFAS.
+
+    The feasibility study concluded cross-border was out of reach because our
+    four national feeds share no station identifiers and no planner. That is
+    true of the feeds; it is not true of ÖBB's HAFAS, which was already being
+    called for Austria and turns out to plan any pair across all four countries
+    and beyond - verified against Warszawa->Berlin and Praha->Budapest, where
+    neither endpoint is Austrian.
+
+    So routing is borrowed and the real work is attribution: every station is
+    resolved across all four countries by observation depth
+    (resolve_station_anywhere), and each transfer reports which country's
+    records answered. Stations none of the four hold - Praha, and Berlin Hbf,
+    which DE's import is missing - return an honest refusal instead of a
+    fabricated figure.
+    """
+    key = ("INT", origin.lower(), destination.lower(), date, time_[:2], n)
+    cached = _PLAN_CACHE.get(key)
+    if cached and time.time() < cached["expires"]:
+        return cached["data"]
+    payload = call_journeys(origin, destination, f"{date}T{time_}:00", n)
+    if not payload:
+        raise HTTPException(status_code=502, detail="ÖBB's planner did not respond.")
+    if payload.get("error") == "station-not-found":
+        raise HTTPException(status_code=404, detail=(
+            "ÖBB's planner does not know one of these stations: "
+            f"from={payload.get('fromResolved')!r} to={payload.get('toResolved')!r}"))
+    svc_date = datetime.strptime(date, "%Y-%m-%d").date()
+    itineraries = []
+    countries_used = set()
+    for j in payload.get("journeys") or []:
+        legs = []
+        for leg in j.get("legs") or []:
+            dep, arr = _parse_iso(leg.get("departure")), _parse_iso(leg.get("arrival"))
+            walking = leg.get("walking")
+            legs.append({
+                "mode": "WALK" if walking else "RAIL",
+                "from": leg.get("from"), "to": leg.get("to"),
+                "depart": dep.isoformat() if dep else None,
+                "arrive": arr.isoformat() if arr else None,
+                "depart_hm": dep.strftime("%H:%M") if dep else None,
+                "arrive_hm": arr.strftime("%H:%M") if arr else None,
+                "route_name": None if walking else leg.get("line"),
+                "train_number": None if walking else (
+                    leg.get("fahrtNr") or extract_at_train_number(leg.get("line"))),
+                "live_trip_id": leg.get("tripId"),
+                "departure_delay_min": (leg.get("departureDelay") or 0) / 60.0,
+                "arrival_delay_min": (leg.get("arrivalDelay") or 0) / 60.0,
+                "realtime": leg.get("departureDelay") is not None,
+                "cancelled": bool(leg.get("cancelled")),
+            })
+        transit = [l for l in legs if l["mode"] != "WALK"]
+        transfers = []
+        for a, b in zip(transit, transit[1:]):
+            buffer_min = None
+            if a["arrive"] and b["depart"]:
+                buffer_min = round((datetime.fromisoformat(b["depart"])
+                                    - datetime.fromisoformat(a["arrive"])).total_seconds() / 60.0, 1)
+            resolved = resolve_station_anywhere(cur, a["to"])
+            if resolved:
+                risk = assess_transfer(cur, resolved[0], a["to"], buffer_min,
+                                       a["route_name"], b["route_name"], resolved=resolved)
+            else:
+                risk = {"assessed": False, "station": a["to"], "buffer_min": buffer_min,
+                        "reason": ("This station is not in any of the four national feeds "
+                                   "this site imports, so no delay history exists for it.")}
+            # Only count a country once it actually produced a figure. Merely
+            # resolving a station there says nothing about whose data backed
+            # the answer, and listing it would overstate the coverage.
+            if risk.get("assessed") and risk.get("data_country"):
+                countries_used.add(risk["data_country"])
+            transfers.append({
+                "station": a["to"], "arrive": a["arrive"], "depart": b["depart"],
+                "buffer_min": buffer_min,
+                "feeder_route": a["route_name"], "feeder_number": a["train_number"],
+                "connector_route": b["route_name"], "connector_number": b["train_number"],
+                "risk": risk,
+            })
+        start = _parse_iso((legs[0] or {}).get("depart")) if legs else None
+        end = _parse_iso((legs[-1] or {}).get("arrive")) if legs else None
+        itineraries.append({
+            "duration_min": round((end - start).total_seconds() / 60.0) if (start and end) else None,
+            "depart": start.isoformat() if start else None,
+            "arrive": end.isoformat() if end else None,
+            "depart_hm": start.strftime("%H:%M") if start else None,
+            "arrive_hm": end.strftime("%H:%M") if end else None,
+            "changes": max(0, len(transit) - 1),
+            "legs": legs, "transfers": transfers,
+        })
+    result = {
+        "country": "INT",
+        "origin": {"name": payload.get("fromResolved"), "display": payload.get("fromResolved")},
+        "destination": {"name": payload.get("toResolved"), "display": payload.get("toResolved")},
+        "date": date, "time": time_,
+        "planner": _PLAN_PROVIDERS["INT"],
+        # Whose history backed the risk figures, so a cross-border journey
+        # cannot silently borrow one country's credibility for another's legs.
+        "risk_data_countries": sorted(countries_used),
+        "itineraries": itineraries,
+        "attribution": COUNTRY_ATTRIBUTION.get("AT"),
+    }
+    _PLAN_CACHE[key] = {"data": result, "expires": time.time() + _PLAN_TTL}
+    return result
 
 @app.get("/plan")
 def get_plan(country: str = "HU", origin: str = "", destination: str = "",
@@ -919,6 +1118,11 @@ def get_plan(country: str = "HU", origin: str = "", destination: str = "",
     conn = get_conn()
     cur = conn.cursor()
     try:
+        if country == "INT":
+            # No per-country lookup: the endpoints may be in different
+            # countries, or in none of ours. HAFAS resolves them itself and
+            # journeys.js reports what it matched.
+            return _plan_international(cur, origin, destination, date, time_, n)
         frm = _plan_station(cur, country, origin)
         to = _plan_station(cur, country, destination)
         if not frm:

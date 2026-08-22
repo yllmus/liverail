@@ -445,7 +445,9 @@ def test_transfer_risk_never_claims_better_than_the_modelled_tail():
 def test_plan_supports_every_registered_planner_country():
     # The registry is the single source of truth for which countries can plan;
     # a country in it must not return 501.
-    assert set(api._PLAN_PROVIDERS) == {"HU", "AT", "PL"}
+    # INT is in the registry too, but it is not a country - it selects the
+    # cross-border planner rather than a national one.
+    assert set(api._PLAN_PROVIDERS) == {"HU", "AT", "PL", "INT"}
     for c in api._PLAN_PROVIDERS:
         assert client.get(f"/plan?country={c}&origin=X").status_code != 501
 
@@ -480,3 +482,44 @@ def test_plan_never_leaks_its_internal_time_keys():
     for it in r.json()["itineraries"]:
         for t in it["transfers"]:
             assert "_arrive_hm" not in t and "_depart_hm" not in t
+
+# --- Cross-border journeys --------------------------------------------
+
+def test_int_is_a_registered_planner():
+    assert api._PLAN_PROVIDERS.get("INT")
+
+def test_resolve_station_anywhere_prefers_depth_over_an_exact_match():
+    # The regression this exists for: DE's import holds a station literally
+    # named "Bohumin" with zero observations, while PL holds the same station
+    # as "Bohumín" with ~19,000. Returning the exact hit reported "no data"
+    # for a station we have thousands of records for.
+    conn = api.get_conn()
+    cur = conn.cursor()
+    try:
+        row = api.resolve_station_anywhere(cur, "Bohumin")
+    finally:
+        cur.close(); conn.close()
+    if row:
+        assert row[0] == "PL", f"expected PL to win on depth, got {row}"
+        assert row[4] > 0
+
+def test_resolve_station_anywhere_strips_hafas_platform_groups():
+    # HAFAS appends platform groups in two shapes, only one parenthesised.
+    conn = api.get_conn()
+    cur = conn.cursor()
+    try:
+        for name in ("Wien Hbf (Bahnsteige 3-12)", "München Hbf Gl.5-10"):
+            row = api.resolve_station_anywhere(cur, name)
+            assert row is not None, f"{name} resolved to nothing"
+            assert row[4] > 0, f"{name} resolved to a station with no history: {row}"
+    finally:
+        cur.close(); conn.close()
+
+def test_resolve_station_anywhere_returns_none_for_a_country_we_do_not_import():
+    conn = api.get_conn()
+    cur = conn.cursor()
+    try:
+        row = api.resolve_station_anywhere(cur, "Zzzz Not A Real Station Xyz")
+    finally:
+        cur.close(); conn.close()
+    assert row is None
