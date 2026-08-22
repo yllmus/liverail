@@ -152,6 +152,18 @@ def _warm_summaries():
                     refresh_search_index(country)
             except Exception as exc:
                 print(f"search index refresh {country} failed: {exc}")
+            # Phase 2's distributions. Measured on this box: 459s for AT, the
+            # smallest country - these are percentile aggregates over the whole
+            # archive and they are genuinely expensive. Guarded on a 24h age
+            # for the same reason search_index is: it lives in Postgres, so a
+            # restart must reuse it rather than spend an hour rebuilding what
+            # is already there. A day-old delay distribution is not meaningfully
+            # worse than a fresh one; an hour of pegged I/O on a single vCPU is.
+            try:
+                if _delay_distribution_stale(country):
+                    refresh_delay_distribution(country)
+            except Exception as exc:
+                print(f"delay distribution refresh {country} failed: {exc}")
         time.sleep(_WARM_INTERVAL)
 
 @app.on_event("startup")
@@ -267,6 +279,176 @@ def refresh_search_index(country):
     finally:
         cur.close()
         conn.close()
+
+# --- Phase 2: precomputed delay distributions -------------------------
+# See schema/012_delay_distribution.sql for the full reasoning. Short version:
+# connection risk needs delay DISTRIBUTIONS, not averages, and computing a
+# percentile over 15.8M rows inside a request is exactly how /routes/summary
+# became a multi-second endpoint. Refreshed from the warmer thread instead.
+
+# Below this, a cell is not a distribution - it is a handful of anecdotes.
+# Callers must fall to a coarser rung rather than quote it.
+_DIST_MIN_SAMPLE = 10
+# Cells thinner than this are not even stored: with three ladder rungs across
+# four countries this is what keeps the table from growing a row per train per
+# stop per day, most of them meaningless.
+_DIST_MIN_STORED = 3
+
+# One statement per ladder rung. Kept as (scope, key-expression, group-by)
+# rather than three near-identical blocks so a fourth rung is a tuple, not a
+# copy-paste - the mistake the poller units made twice (see NOTES.md).
+_DIST_RUNGS = (
+    ("trip",    "o.trip_id::text", "o.trip_id, o.station_id", "AND o.trip_id IS NOT NULL"),
+    ("route",   "o.route_name",    "o.route_name, o.station_id", "AND o.route_name IS NOT NULL"),
+    ("station", "''",              "o.station_id", ""),
+)
+
+def _delay_distribution_stale(country, max_age_hours=24):
+    """Has this country's distribution gone longer than max_age_hours?
+
+    Same contract as _search_index_stale: this cache lives in Postgres, so a
+    restart must reuse it. Measured cost of rebuilding one country is ~8
+    minutes for the smallest of the four, so an unguarded rebuild on every
+    restart would be an hour of pegged I/O on a single vCPU shared with four
+    pollers - the exact failure that guard was added to prevent for search.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""SELECT max(refreshed_at) FROM delay_distribution
+                       WHERE country_code = %s""", (country,))
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            return True
+        return (datetime.now() - row[0]).total_seconds() > max_age_hours * 3600
+    finally:
+        cur.close()
+        conn.close()
+
+def refresh_delay_distribution(country):
+    """Recompute all three ladder rungs for one country. Warmer thread only."""
+    conn = get_conn()
+    cur = conn.cursor()
+    written = 0
+    try:
+        cur.execute("DELETE FROM delay_distribution WHERE country_code = %s", (country,))
+        for scope, key_expr, group_by, extra_where in _DIST_RUNGS:
+            # percentile_cont ignores NULLs, so cancelled rows (delay_minutes
+            # NULL by Phase 1's design) correctly do not drag the percentiles
+            # toward zero - they are counted in cancellation_rate instead.
+            cur.execute(f"""
+                INSERT INTO delay_distribution
+                    (country_code, scope, scope_key, station_id,
+                     sample_count, days_seen, p50, p75, p90, p95, worst,
+                     arr_p50, arr_p90, dep_p50, dep_p90, arr_samples, dep_samples,
+                     cancellation_rate)
+                SELECT %s, %s, {key_expr}, o.station_id,
+                       COUNT(o.delay_minutes),
+                       COUNT(DISTINCT o.observed_date),
+                       percentile_cont(0.50) WITHIN GROUP (ORDER BY o.delay_minutes),
+                       percentile_cont(0.75) WITHIN GROUP (ORDER BY o.delay_minutes),
+                       percentile_cont(0.90) WITHIN GROUP (ORDER BY o.delay_minutes),
+                       percentile_cont(0.95) WITHIN GROUP (ORDER BY o.delay_minutes),
+                       MAX(o.delay_minutes),
+                       percentile_cont(0.50) WITHIN GROUP (ORDER BY o.delay_arrival_minutes),
+                       percentile_cont(0.90) WITHIN GROUP (ORDER BY o.delay_arrival_minutes),
+                       percentile_cont(0.50) WITHIN GROUP (ORDER BY o.delay_departure_minutes),
+                       percentile_cont(0.90) WITHIN GROUP (ORDER BY o.delay_departure_minutes),
+                       COUNT(o.delay_arrival_minutes),
+                       COUNT(o.delay_departure_minutes),
+                       COUNT(*) FILTER (WHERE o.is_cancelled)::float / NULLIF(COUNT(*), 0)
+                FROM delay_observations o
+                WHERE o.country_code = %s AND o.station_id IS NOT NULL {extra_where}
+                GROUP BY {group_by}
+                HAVING COUNT(*) >= %s
+                ON CONFLICT (country_code, scope, scope_key, station_id, hour_band, weekday_type)
+                DO NOTHING
+            """, (country, scope, country, _DIST_MIN_STORED))
+            written += cur.rowcount
+        conn.commit()
+        return written
+    finally:
+        cur.close()
+        conn.close()
+
+def lookup_delay_distribution(cur, country, station_id, trip_id=None, route_name=None,
+                              min_sample=None):
+    """Walk the ladder until a rung clears the sample minimum.
+
+    Returns the row plus which rung answered, because a figure whose
+    provenance is invisible is worse than no figure - "based on this exact
+    train" and "based on the station generally" are different claims and the
+    caller has to be able to say which it is making. Returns None when even
+    the station rung is too thin, rather than quoting a number from four
+    observations.
+    """
+    min_sample = _DIST_MIN_SAMPLE if min_sample is None else min_sample
+    ladder = []
+    if trip_id is not None:
+        ladder.append(("trip", str(trip_id)))
+    if route_name:
+        ladder.append(("route", route_name))
+    ladder.append(("station", ""))
+    for scope, key in ladder:
+        cur.execute("""
+            SELECT scope, scope_key, sample_count, days_seen, p50, p75, p90, p95, worst,
+                   arr_p50, arr_p90, dep_p50, dep_p90, arr_samples, dep_samples,
+                   cancellation_rate
+            FROM delay_distribution
+            WHERE country_code = %s AND station_id = %s AND scope = %s AND scope_key = %s
+              AND hour_band IS NULL AND weekday_type IS NULL
+        """, (country, station_id, scope, key))
+        row = cur.fetchone()
+        if row and (row[2] or 0) >= min_sample:
+            return row
+    return None
+
+@app.get("/distribution")
+def get_distribution(country: str = "HU", station: str = "", trip_id: int = None,
+                     route_name: str = "", min_sample: int = None):
+    """The delay distribution at one station, with its provenance.
+
+    Phase 4 (transfer probability) consumes this; it is exposed on its own so
+    the numbers behind a risk figure can be inspected rather than taken on
+    trust.
+    """
+    country = country.upper()
+    if not station:
+        raise HTTPException(status_code=400, detail="station is required")
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""SELECT id, COALESCE(display_name, name) FROM stations
+                       WHERE name = %s AND country_code = %s LIMIT 1""", (station, country))
+        srow = cur.fetchone()
+        if not srow:
+            raise HTTPException(status_code=404, detail=f"No station {station!r} in {country}")
+        station_id, station_display = srow
+        row = lookup_delay_distribution(cur, country, station_id, trip_id,
+                                        route_name or None, min_sample)
+    finally:
+        cur.close()
+        conn.close()
+
+    base = {"country": country, "station": station, "station_display": station_display,
+            "min_sample": _DIST_MIN_SAMPLE if min_sample is None else min_sample}
+    if not row:
+        # Explicit, not an empty object: the ladder ran and every rung was too
+        # thin. That is a real answer and a different one from "no such stop".
+        base.update({"found": False, "basis": None,
+                     "reason": ("No rung of the ladder has enough observations yet. "
+                                "Stop-level history began on 21 August 2026 and "
+                                "three of the four countries hold about three weeks.")})
+        return base
+    keys = ("basis", "basis_key", "sample_count", "days_seen", "p50", "p75", "p90", "p95",
+            "worst", "arr_p50", "arr_p90", "dep_p50", "dep_p90", "arr_samples",
+            "dep_samples", "cancellation_rate")
+    base.update({"found": True})
+    base.update(dict(zip(keys, row)))
+    # AT never publishes arrival delays at all (0/314 measured) - structural,
+    # not a thin sample, and the caller must not read empty as "never late".
+    base["arrival_available"] = country != "AT"
+    return base
 
 @app.get("/search")
 def search(q: str, country: str = "HU", limit: int = 10, kind: str = None):

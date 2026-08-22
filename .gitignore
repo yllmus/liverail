@@ -62,6 +62,7 @@
 !schema/009_de_station_merge_round2.sql
 !schema/010_poller_dedup_index.sql
 !schema/011_station_board_date_index.sql
+!schema/012_delay_distribution.sql
 
 # Disaster recovery (2026-08-22). schema.sql is the generated full structure -
 # the repo previously had no CREATE TABLE for the six core tables at all.

@@ -328,3 +328,40 @@ def test_train_stops_rejects_an_unknown_country():
 def test_train_stops_clamps_the_day_range():
     assert client.get("/train/DE/nope/stops?days=99999").json()["days"] == api._HISTORY_MAX_DAYS
     assert client.get("/train/DE/nope/stops?days=0").json()["days"] == 1
+
+# --- Phase 2: delay distributions -------------------------------------
+
+def test_distribution_requires_a_station():
+    assert client.get("/distribution?country=AT").status_code == 400
+
+def test_distribution_404s_on_an_unknown_station():
+    assert client.get("/distribution?country=AT&station=Nowhere-At-All").status_code == 404
+
+def test_distribution_reports_which_ladder_rung_answered():
+    # A figure whose provenance is invisible is worse than no figure: "based
+    # on this exact train" and "based on the station generally" are different
+    # claims. basis must always say which.
+    r = client.get("/distribution?country=AT&station=Wien Quartier Belvedere")
+    assert r.status_code == 200
+    b = r.json()
+    if b["found"]:
+        assert b["basis"] in ("trip", "route", "station")
+        assert b["sample_count"] >= b["min_sample"]
+
+def test_distribution_refuses_rather_than_quoting_a_thin_sample():
+    # An unreachable minimum must exhaust the ladder and say so, not return
+    # the coarsest rung anyway. A probability from four observations is a lie
+    # with a decimal point.
+    b = client.get("/distribution?country=AT&station=Wien Quartier Belvedere"
+                   "&min_sample=999999999").json()
+    assert b["found"] is False
+    assert b["basis"] is None
+    assert b["reason"]
+
+def test_distribution_falls_back_when_the_route_is_unknown():
+    # A route with no cell must drop to the station rung, not 404 and not
+    # silently report the route as its basis.
+    b = client.get("/distribution?country=AT&station=Wien Quartier Belvedere"
+                   "&route_name=NO-SUCH-ROUTE-ZZZ").json()
+    if b["found"]:
+        assert b["basis"] == "station"
