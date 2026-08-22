@@ -57,6 +57,7 @@
 # /train/AT/{id} calls this, so a fresh clone had a broken AT train page. Same
 # class as the hu_route_names.py omission documented in NOTES.md.
 !hafas/trip.js
+!hafas/journeys.js
 !schema/007_de_station_merge.sql
 !schema/008_stop_identity.sql
 !schema/009_de_station_merge_round2.sql

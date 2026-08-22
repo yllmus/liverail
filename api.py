@@ -14,7 +14,8 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from google.transit import gtfs_realtime_pb2
 from austria_poller import (
-    call_radar, call_trip, parse_at_vehicles,
+    call_radar, call_trip, call_journeys, parse_at_vehicles,
+    station_name_candidates as at_station_name_candidates,
     resolve_trip_id as at_resolve_trip_id,
 )
 from poller import resolve_trip_id as hu_resolve_trip_id
@@ -557,8 +558,18 @@ def _dist_row_map(row):
 def assess_transfer(cur, country, station_name, buffer_min,
                     feeder_route=None, connector_route=None, min_sample=None):
     """Risk for one transfer, or an explicit refusal with the reason."""
+    # AT's HAFAS names and its own GTFS names disagree on formatting for a
+    # real chunk of stations - "Wörgl Hbf" vs "Wörgl Hauptbahnhof", trailing
+    # " Bahnhof", parenthetical platform qualifiers. Confirmed here rather than
+    # assumed: a Bregenz->Graz plan produced four transfers, three of which
+    # resolved to no station at all under an exact match. The poller already
+    # solves this with station_name_candidates(); the same list is used here so
+    # a transfer is not silently unassessable for a station we do hold.
+    names = at_station_name_candidates(station_name) if country == "AT" else [station_name]
     cur.execute("""SELECT id, COALESCE(display_name, name) FROM stations
-                   WHERE country_code = %s AND name = %s LIMIT 1""", (country, station_name))
+                   WHERE country_code = %s AND name = ANY(%s)
+                   ORDER BY array_position(%s, name) LIMIT 1""",
+                (country, names, names))
     srow = cur.fetchone()
     if not srow:
         return {"assessed": False, "reason": f"No station {station_name!r} on record."}
@@ -630,19 +641,98 @@ def get_transfer_risk(country: str = "HU", station: str = "", buffer_min: float 
     result["country"] = country
     return result
 
+def _normalise_plan_at(raw, country, cur):
+    """ÖBB's journeys() -> the same shape /plan returns for Hungary.
+
+    Deliberately produces the identical structure rather than a near-miss:
+    the frontend, the transfer risk call and every future consumer are shared,
+    and a second shape would mean every one of them growing a per-country
+    branch. Differences from OTP that have to be absorbed here: ISO timestamps
+    instead of epoch milliseconds, `line` instead of a route long_name, an
+    explicit `walking` flag instead of a mode string, and fahrtNr carrying the
+    train number outright (which radar() never fills - see austria_poller).
+    """
+    out = []
+    for j in raw or []:
+        legs = []
+        for leg in j.get("legs") or []:
+            dep = _parse_iso(leg.get("departure"))
+            arr = _parse_iso(leg.get("arrival"))
+            walking = leg.get("walking")
+            line = leg.get("line")
+            legs.append({
+                "mode": "WALK" if walking else "RAIL",
+                "from": leg.get("from"), "to": leg.get("to"),
+                "depart": dep.isoformat() if dep else None,
+                "arrive": arr.isoformat() if arr else None,
+                "depart_hm": dep.strftime("%H:%M") if dep else None,
+                "arrive_hm": arr.strftime("%H:%M") if arr else None,
+                "route_name": None if walking else line,
+                # fahrtNr where HAFAS gives it, else pulled from the line name
+                # by the same function the AT poller resolves trips with, so a
+                # leg is joinable to our history either way.
+                "train_number": None if walking else (
+                    leg.get("fahrtNr") or extract_at_train_number(line)),
+                "live_trip_id": leg.get("tripId"),
+                "departure_delay_min": (leg.get("departureDelay") or 0) / 60.0,
+                "arrival_delay_min": (leg.get("arrivalDelay") or 0) / 60.0,
+                "realtime": leg.get("departureDelay") is not None,
+                "cancelled": bool(leg.get("cancelled")),
+            })
+        transit = [l for l in legs if l["mode"] != "WALK"]
+        transfers = []
+        for a, b in zip(transit, transit[1:]):
+            buffer_min = None
+            if a["arrive"] and b["depart"]:
+                buffer_min = round((datetime.fromisoformat(b["depart"])
+                                    - datetime.fromisoformat(a["arrive"])).total_seconds() / 60.0, 1)
+            transfers.append({
+                "station": a["to"], "arrive": a["arrive"], "depart": b["depart"],
+                "buffer_min": buffer_min,
+                "feeder_route": a["route_name"], "feeder_number": a["train_number"],
+                "connector_route": b["route_name"], "connector_number": b["train_number"],
+                "risk": assess_transfer(cur, country, a["to"], buffer_min,
+                                        a["route_name"], b["route_name"]),
+            })
+        start = _parse_iso((legs[0] or {}).get("depart")) if legs else None
+        end = _parse_iso((legs[-1] or {}).get("arrive")) if legs else None
+        out.append({
+            "duration_min": round((end - start).total_seconds() / 60.0) if (start and end) else None,
+            "depart": start.isoformat() if start else None,
+            "arrive": end.isoformat() if end else None,
+            "depart_hm": start.strftime("%H:%M") if start else None,
+            "arrive_hm": end.strftime("%H:%M") if end else None,
+            "changes": max(0, len(transit) - 1),
+            "legs": legs, "transfers": transfers,
+        })
+    return out
+
+def _parse_iso(v):
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(v)
+    except ValueError:
+        return None
+
+# Which countries can plan at all, and how. A registry rather than an if/elif
+# chain for the same reason _LIVE_PROVIDERS is one: adding a country should be
+# an entry, not another copy of the surrounding plumbing.
+_PLAN_PROVIDERS = {"HU": "mav-otp", "AT": "oebb-hafas"}
+
 @app.get("/plan")
 def get_plan(country: str = "HU", origin: str = "", destination: str = "",
              date: str = None, time_: str = None, itineraries: int = 3):
     """Plan a journey. Hungary only - see the block comment above for why."""
     country = country.upper()
-    if country != "HU":
+    if country not in _PLAN_PROVIDERS:
         raise HTTPException(
             status_code=501,
-            detail=(f"Journey planning is not available for {country}. Only Hungary has a "
-                    "usable planner today (MÁV's OTP). Austria could reuse hafas-client's "
-                    "journeys(); Germany's HAFAS is shut down and Poland's feed is a data "
-                    "mirror with no planning API, so both need a connection-scan search "
-                    "over the imported stop_times."))
+            detail=(f"Journey planning is not available for {country}. Hungary uses MÁV's "
+                    "OTP and Austria uses ÖBB's HAFAS; Germany's HAFAS is shut down and "
+                    "Poland's feed is a data mirror with no planning API, so both need a "
+                    "connection-scan search over the imported stop_times. That is real "
+                    "work, not a missing switch."))
     if not origin or not destination:
         raise HTTPException(status_code=400, detail="origin and destination are required")
     n = max(1, min(itineraries, _PLAN_MAX_ITINERARIES))
@@ -679,17 +769,33 @@ def get_plan(country: str = "HU", origin: str = "", destination: str = "",
             cached = _PLAN_CACHE.get(key)
             if cached and time.time() < cached["expires"]:
                 return cached["data"]
-            q = _PLAN_QUERY % {"flat": frm[3], "flon": frm[4], "tlat": to[3], "tlon": to[4],
-                               "date": date, "time": time_ + ":00", "n": n}
-            try:
-                resp = req.post(GRAPHQL_URL, json={"query": q}, timeout=25)
-                body = resp.json()
-            except Exception as exc:
-                raise HTTPException(status_code=502, detail=f"MÁV's planner did not respond: {exc}")
-            if body.get("errors"):
-                raise HTTPException(status_code=502,
-                                    detail=f"MÁV's planner rejected the query: {body['errors'][:1]}")
-            raw = ((body.get("data") or {}).get("plan") or {}).get("itineraries") or []
+            if country == "AT":
+                dep_iso = f"{date}T{time_}:00"
+                # ÖBB resolves by its own station names, so pass the names we
+                # hold. journeys.js reports what it matched so a wrong match is
+                # visible rather than silently planning from somewhere else.
+                payload = call_journeys(frm[1], to[1], dep_iso, n)
+                if not payload:
+                    raise HTTPException(status_code=502, detail="ÖBB's planner did not respond.")
+                if payload.get("error") == "station-not-found":
+                    raise HTTPException(
+                        status_code=404,
+                        detail=("ÖBB's planner does not know one of these stations: "
+                                f"from={payload.get('fromResolved')!r} to={payload.get('toResolved')!r}"))
+                itineraries = _normalise_plan_at(payload.get("journeys"), country, cur)
+            else:
+                q = _PLAN_QUERY % {"flat": frm[3], "flon": frm[4], "tlat": to[3], "tlon": to[4],
+                                   "date": date, "time": time_ + ":00", "n": n}
+                try:
+                    resp = req.post(GRAPHQL_URL, json={"query": q}, timeout=25)
+                    body = resp.json()
+                except Exception as exc:
+                    raise HTTPException(status_code=502, detail=f"MÁV's planner did not respond: {exc}")
+                if body.get("errors"):
+                    raise HTTPException(status_code=502,
+                                        detail=f"MÁV's planner rejected the query: {body['errors'][:1]}")
+                raw = ((body.get("data") or {}).get("plan") or {}).get("itineraries") or []
+                itineraries = _normalise_plan(raw, country, cur)
             result = {
                 "country": country,
                 "origin": {"name": frm[1], "display": frm[2]},
@@ -697,8 +803,8 @@ def get_plan(country: str = "HU", origin: str = "", destination: str = "",
                 "date": date, "time": time_,
                 # Named so a consumer can tell a borrowed planner from one of
                 # ours when Austria/Poland/Germany arrive by different routes.
-                "planner": "mav-otp",
-                "itineraries": _normalise_plan(raw, country, cur),
+                "planner": _PLAN_PROVIDERS[country],
+                "itineraries": itineraries,
                 "attribution": COUNTRY_ATTRIBUTION.get(country),
             }
             _PLAN_CACHE[key] = {"data": result, "expires": time.time() + _PLAN_TTL}

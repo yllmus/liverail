@@ -91,6 +91,24 @@ def call_trip(trip_id, line_name=None):
         return None
     return json.loads(result.stdout)
 
+def call_journeys(from_name, to_name, departure_iso=None, results=4):
+    # Journey planning for /plan's AT branch. Third and last of the oneshot
+    # HAFAS subprocesses, same convention as call_radar/call_trip so all three
+    # invocations live together. Longer timeout than the others because
+    # journeys() resolves two station names before it plans anything.
+    result = subprocess.run(
+        ["node", "hafas/journeys.js", from_name, to_name,
+         departure_iso or "", str(results)],
+        capture_output=True, text=True, timeout=45
+    )
+    if result.returncode != 0:
+        print(f"journeys.js error: {result.stderr.strip()}")
+        return None
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        return None
+
 def parse_at_vehicles(movements):
     rows = []
     for m in movements or []:
