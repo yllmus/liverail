@@ -427,6 +427,29 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 @media(max-width:640px){.simple-wrap{padding-top:28px}.simple-search input{min-height:54px;font-size:17px}.simple-delay{font-size:36px}
   .track-id{font-size:24px}.track-journey,.track-stats{padding:18px 16px}.dep-row{padding:12px 16px}
   .jstop{grid-template-columns:18px 1fr auto;gap:8px}.jdelay{display:none}}
+.plan-form{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.plan-in{flex:1 1 180px;min-width:140px;padding:9px 12px;border-radius:var(--radius);
+  border:1px solid var(--border);background:var(--surface);color:var(--text);font:14px var(--font)}
+.plan-time{flex:0 0 120px}
+.plan-meta{font:12px var(--font-mono);color:var(--text-dim);margin:6px 0 12px}
+.plan-it{border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:12px;background:var(--surface)}
+.plan-it-head{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px}
+.plan-it-head b{font-size:16px}
+.plan-it-head span{font:12px var(--font-mono);color:var(--text-dim)}
+.plan-worst{font-weight:700}
+.plan-leg{display:flex;gap:10px;font:12px var(--font-mono);padding:3px 0;flex-wrap:wrap}
+.plan-leg-t{color:var(--text-dim);flex:0 0 96px}
+.plan-leg-r{font-weight:700;flex:0 0 auto}
+.plan-leg-s{color:var(--text-dim)}
+.plan-xfer{margin:8px 0 4px;padding:8px 10px;border-left:3px solid var(--border);background:var(--bg)}
+.xfer-head{font:12px var(--font-mono);margin-bottom:4px}
+.xfer-risk{display:flex;flex-direction:column;gap:2px}
+.xfer-risk b{font-size:14px;text-transform:capitalize}
+.xfer-risk span{font-size:11px;color:var(--text-dim);line-height:1.45}
+.xfer-risk.sev-ok b{color:var(--sev-ok)}
+.xfer-risk.sev-late b{color:var(--sev-late)}
+.xfer-risk.sev-bad b{color:var(--sev-bad)}
+.xfer-unknown b{color:var(--text-dim)}
 </style>
 </head>
 <body>
@@ -448,6 +471,7 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
   <div class="wrap">
     <button class="vtab active" data-view="simple">Find my train</button>
     <button class="vtab" data-view="live">Advanced view</button>
+    <button class="vtab" data-view="plan">Plan a journey</button>
     <button class="vtab" data-view="rankings">Rankings</button>
     <button class="vtab" data-view="compare">Compare</button>
   </div>
@@ -494,6 +518,19 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
     </div>
   </section>
 
+  <section class="view" id="view-plan">
+    <div class="panel">
+      <h2>Plan a journey</h2>
+      <p class="panel-sub" id="planAvail">Hungary only for now — MÁV is the one operator of the four that publishes a journey planner we can use.</p>
+      <div class="plan-form">
+        <input id="planFrom" class="plan-in" type="text" placeholder="From (e.g. Debrecen)" autocomplete="off">
+        <input id="planTo" class="plan-in" type="text" placeholder="To (e.g. Sopron)" autocomplete="off">
+        <input id="planTime" class="plan-in plan-time" type="time">
+        <button id="planGo" class="btn btn-primary">Find journeys</button>
+      </div>
+      <div id="planResult"></div>
+    </div>
+  </section>
   <section class="view" id="view-rankings">
     <h2>Rankings</h2>
     <p class="h2-note">Worst right now — this instant's live snapshot, grouped by route/station. Below it: historical reliability, every station/route with at least 20 (stations) or 5 (routes) recorded observations, ranked by on-time percentage.</p>
@@ -694,12 +731,95 @@ Array.prototype.forEach.call(document.querySelectorAll('.vtab'),function(btn){
     state.view=v;
     Array.prototype.forEach.call(document.querySelectorAll('.vtab'),function(b){b.classList.toggle('active',b===btn);});
     Array.prototype.forEach.call(document.querySelectorAll('.view'),function(s){s.classList.toggle('active',s.id==='view-'+v);});
+    if(v==='plan')initPlan();
     if(v==='rankings')loadRankings();
     if(v==='compare')loadCompareList();
     if(v==='live'&&state.map)setTimeout(function(){state.map.invalidateSize();},50);
   });
 });
 
+/* ---------- Phase 5: journey plan + transfer risk ---------- */
+// The transfer is where the anxiety is, so the transfer is what this leads
+// with - not a composite score for the whole itinerary. Every risk figure
+// shows what it is based on, because a number whose provenance is invisible
+// is worse than no number.
+var PLAN_RISK_CLASS={comfortable:'sev-ok','usually fine':'sev-ok',tight:'sev-late',unlikely:'sev-bad'};
+function initPlan(){
+  var t=document.getElementById('planTime');
+  if(t&&!t.value){var d=new Date();t.value=('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);}
+  var avail=document.getElementById('planAvail');
+  if(avail)avail.style.display=(state.country==='HU')?'':'none';
+  var res=document.getElementById('planResult');
+  if(state.country!=='HU'&&res&&!res.dataset.warned){
+    res.dataset.warned='1';
+  }
+  if(state.country!=='HU'&&res){
+    res.innerHTML='<div class="empty-msg">Journey planning is only available for Hungary at the moment. '+
+      'MÁV publishes a planner we can use; Germany\u2019s was shut down, and Poland\u2019s feed is a data mirror with none. '+
+      'Switch the country to Hungary to plan a journey.</div>';
+  }
+}
+function runPlan(){
+  var res=document.getElementById('planResult');
+  if(state.country!=='HU'){initPlan();return;}
+  var from=(document.getElementById('planFrom')||{}).value||'';
+  var to=(document.getElementById('planTo')||{}).value||'';
+  var tm=(document.getElementById('planTime')||{}).value||'';
+  if(!from||!to){res.innerHTML='<div class="empty-msg">Enter where you are starting and where you are going.</div>';return;}
+  res.innerHTML='<div class="rank-loading"><span class="spinner"></span>Asking MÁV for journeys\u2026</div>';
+  var q={origin:from,destination:to,itineraries:4};
+  if(tm)q.time_=tm;
+  api('/plan',q).then(function(d){renderPlan(res,d);})
+   .catch(function(e){res.innerHTML='<div class="empty-msg">Could not plan that journey. '+esc(String(e&&e.message||''))+'</div>';});
+}
+function renderRisk(r){
+  if(!r)return '';
+  if(!r.assessed){
+    // An explicit "we don't know" - never an implied "it's fine".
+    return '<div class="xfer-risk xfer-unknown"><b>Risk unknown</b><span>'+esc(r.reason||'')+'</span></div>';
+  }
+  var cls=PLAN_RISK_CLASS[r.label]||'';
+  var basis=r.feeder_basis==='trip'?'this exact train':(r.feeder_basis==='route'?'this route at this station':'this station overall');
+  return '<div class="xfer-risk '+cls+'">'+
+    '<b>'+esc(r.label||'\u2014')+'</b>'+
+    '<span>Based on '+Number(r.feeder_samples||0).toLocaleString()+' observations of '+basis+
+      ' over '+(r.feeder_days||0)+' day'+((r.feeder_days===1)?'':'s')+'. '+
+      'Assumes '+r.interchange_min+' min to change platforms \u2014 no feed publishes a real figure for this country.</span>'+
+    '</div>';
+}
+function renderPlan(el,d){
+  var its=d.itineraries||[];
+  if(!its.length){el.innerHTML='<div class="empty-msg">No journeys found for that time.</div>';return;}
+  var html='<div class="plan-meta">'+esc(d.origin.display)+' \u2192 '+esc(d.destination.display)+
+           ' \u00b7 '+esc(d.date)+' from '+esc(d.time)+'</div>';
+  its.forEach(function(it,i){
+    // The tightest transfer decides how the whole itinerary should be read,
+    // so it is surfaced on the header rather than buried in the legs.
+    var worst=null;
+    (it.transfers||[]).forEach(function(t){
+      var r=t.risk;
+      if(r&&r.assessed&&r.probability!=null&&(worst===null||r.probability<worst.probability))worst=r;
+    });
+    html+='<div class="plan-it">'+
+      '<div class="plan-it-head"><b>'+esc(it.depart_hm||'')+' \u2192 '+esc(it.arrive_hm||'')+'</b>'+
+      '<span>'+it.duration_min+' min \u00b7 '+(it.changes?it.changes+' change'+(it.changes===1?'':'s'):'direct')+'</span>'+
+      (worst?'<span class="plan-worst '+(PLAN_RISK_CLASS[worst.label]||'')+'">tightest change: '+esc(worst.label)+'</span>':'')+
+      '</div>';
+    (it.legs||[]).forEach(function(l){
+      if(!l.route_name&&!l.train_number)return;   // OTP's zero-length walk legs
+      html+='<div class="plan-leg"><span class="plan-leg-t">'+esc(l.depart_hm||'')+'\u2013'+esc(l.arrive_hm||'')+'</span>'+
+        '<span class="plan-leg-r">'+esc(l.route_name||'')+'</span>'+
+        '<span class="plan-leg-s">'+esc(l.from||'')+' \u2192 '+esc(l.to||'')+'</span></div>';
+    });
+    (it.transfers||[]).forEach(function(t){
+      html+='<div class="plan-xfer"><div class="xfer-head">Change at <b>'+esc((t.risk&&t.risk.station_display)||t.station||'')+'</b>'+
+        ' \u00b7 '+(t.buffer_min!=null?t.buffer_min+' min to connect':'')+'</div>'+renderRisk(t.risk)+'</div>';
+    });
+    html+='</div>';
+  });
+  html+='<div class="track-stat-note">Journeys from MÁV\u2019s own planner. Risk figures are from this site\u2019s recorded delay history for Hungary only.</div>';
+  el.innerHTML=html;
+}
 /* ---------- attribution / countries meta ---------- */
 function loadCountriesMeta(){
   api('/countries').then(function(rows){
@@ -1050,6 +1170,7 @@ wireSearch('cmpInput','cmpPop',function(r){addCompare(r.name);},'route');
    view already calls - this is a different presentation of the same real
    data, not a separate parallel feature to keep in sync. */
 wireTrainSearch('simpleInput','simplePop');
+var _pg=document.getElementById('planGo');if(_pg)_pg.addEventListener('click',runPlan);
 Array.prototype.forEach.call(document.querySelectorAll('[data-view-link]'),function(a){
   a.addEventListener('click',function(e){
     e.preventDefault();
