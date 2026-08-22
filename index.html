@@ -465,6 +465,12 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 .stag-cc{color:var(--accent-ink)!important;background:var(--accent);border-radius:4px;padding:2px 5px}
 .plan-xb{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-dim);white-space:nowrap}
 .plan-xb input{accent-color:var(--accent)}
+.plan-rel{font-family:"IBM Plex Mono",monospace;font-weight:700;font-size:12px;padding:1px 7px;
+  border-radius:3px;background:var(--line-soft)}
+.plan-rel.sev-ok{color:var(--sev-ontime)}
+.plan-rel.sev-late{color:var(--sev-late)}
+.plan-rel.sev-bad{color:var(--sev-severe)}
+.plan-rel-note{font-size:12px;color:var(--text-dim);margin:-2px 0 8px;line-height:1.45}
 </style>
 </head>
 <body>
@@ -815,6 +821,31 @@ function renderRisk(r){
 // A tight change with no way out is just anxiety. These are only present when
 // the risk layer judged the change tight or unlikely, so the mere existence of
 // this block is the signal - it is never rendered for a change that is fine.
+// Reliability of a whole journey, from its last leg's recorded history times
+// the odds of making every change. Ordering comes from the API - most likely
+// to work first - so the badge explains an order the rider can already see.
+var REL_CLASS={reliable:'sev-ok','usually fine':'sev-ok',risky:'sev-late',unreliable:'sev-bad'};
+function relBadge(r){
+  if(!r||!r.assessed)return '';
+  return '<span class="plan-rel '+(REL_CLASS[r.label]||'')+'">'+
+    Math.round(r.on_time_chance*100)+'% on time</span>';
+}
+function relLine(r){
+  if(!r)return '';
+  if(!r.assessed){
+    // Never rendered as a poor score. No history and a bad record are
+    // different things and only one of them is knowable.
+    return '<div class="plan-rel-note">'+esc(r.reason||'No reliability history for this journey yet.')+'</div>';
+  }
+  var d=r.expected_delay_min;
+  var typical = d>0.5 ? ('usually arrives about '+fmtNum(d,0)+' min late')
+                      : 'usually arrives on time';
+  return '<div class="plan-rel-note">'+esc(r.label)+' \u2014 '+typical+
+    ', from '+Number(r.samples||0).toLocaleString()+' recorded arrivals over '+
+    (r.days||0)+' day'+((r.days===1)?'':'s')+
+    (r.cancellation_rate>0.005?('. Cancelled '+fmtNum(r.cancellation_rate*100,1)+'% of the time'):'')+
+    '.</div>';
+}
 function renderAlternatives(alts){
   if(!alts||!alts.length)return '';
   return '<div class="xfer-alts"><div class="xfer-alts-h">Later trains that also get you there</div>'+
@@ -842,8 +873,9 @@ function renderPlan(el,d){
     html+='<div class="plan-it">'+
       '<div class="plan-it-head"><b>'+esc(it.depart_hm||'')+' \u2192 '+esc(it.arrive_hm||'')+'</b>'+
       '<span>'+it.duration_min+' min \u00b7 '+(it.changes?it.changes+' change'+(it.changes===1?'':'s'):'direct')+'</span>'+
+      relBadge(it.reliability)+
       (worst?'<span class="plan-worst '+(PLAN_RISK_CLASS[worst.label]||'')+'">tightest change: '+esc(worst.label)+'</span>':'')+
-      '</div>';
+      '</div>'+relLine(it.reliability);
     (it.legs||[]).forEach(function(l){
       if(!l.route_name&&!l.train_number)return;   // OTP's zero-length walk legs
       html+='<div class="plan-leg"><span class="plan-leg-t">'+esc(l.depart_hm||'')+'\u2013'+esc(l.arrive_hm||'')+'</span>'+

@@ -890,6 +890,118 @@ def _attach_safer(cur, country, transfers, dest_name, service_date):
             print(f"safer_connectors failed at {t.get('station')}: {exc}")
             t["alternatives"] = []
 
+# --- Journey reliability: which departure should I actually take? --------
+# The planner returns several itineraries and they are ordered by time, which
+# is the only thing a timetable knows. What a rider wants is which one is
+# likely to WORK. Every leg's history is already in delay_distribution, so
+# this attaches it.
+#
+# Two figures, because they answer different questions:
+#   expected_delay_min - the median outcome, "you will probably arrive N late"
+#   on_time_chance     - P(within ON_TIME_MIN of schedule), which is what a
+#                        person actually means by "is this train reliable"
+#
+# The final leg's arrival is what matters for the journey; intermediate legs
+# matter only through the transfers, which /transfer/risk already scores. So
+# the arrival estimate is taken from the last leg and the transfer risks are
+# multiplied in - a journey you cannot complete is not an on-time journey.
+ON_TIME_MIN = 5.0
+RELIABILITY_MIN_DAYS = 5
+
+
+def _leg_distribution(cur, country, station_name, route_name):
+    resolved = resolve_station_anywhere(cur, station_name) if station_name else None
+    if not resolved:
+        return None
+    row = lookup_delay_distribution(cur, resolved[0], resolved[1], None, route_name)
+    return _dist_row_map(row)
+
+
+def _rank_itineraries(itineraries):
+    """Most reliable first, keeping unassessed ones in timetable order behind.
+
+    An itinerary with no history is NOT ranked as if it were poor - it is
+    simply not ranked, and sorts after the ones that could be judged. Guessing
+    would put a train nobody has data on below one measured at 40%, which
+    would be an invention.
+    """
+    scored = [i for i in itineraries if (i.get("reliability") or {}).get("assessed")]
+    unscored = [i for i in itineraries if not (i.get("reliability") or {}).get("assessed")]
+    scored.sort(key=lambda i: (-(i["reliability"]["on_time_chance"]),
+                               i.get("duration_min") or 1e9))
+    return scored + unscored
+
+
+def journey_reliability(cur, country, itinerary):
+    """How likely is this itinerary to deliver you roughly on time?
+
+    Deliberately conservative about saying nothing: a journey whose final leg
+    has no usable history returns assessed=False rather than a number derived
+    from the country average, because "we do not know" and "it is average" are
+    different claims and only one of them is true.
+    """
+    legs = [l for l in (itinerary.get("legs") or []) if l.get("mode") != "WALK"]
+    if not legs:
+        return {"assessed": False, "reason": "no rail legs"}
+    last = legs[-1]
+    dist = _leg_distribution(cur, country, last.get("to"), last.get("route_name"))
+    if not dist or (dist.get("days_seen") or 0) < RELIABILITY_MIN_DAYS:
+        return {"assessed": False,
+                "reason": ("No arrival history yet for the last leg of this journey. "
+                           "Reliability needs a few weeks of the same train.")}
+
+    import numpy as _np
+    mix = _mixture_of(dist)
+    if mix is not None:
+        from transfer_backtest import sample_mixture
+        draws = sample_mixture(mix, 4000, _np.random.default_rng(0))
+        on_time = float(_np.mean(draws <= ON_TIME_MIN))
+        expected = float(_np.median(draws))
+        basis_model = "mixture"
+    else:
+        # Percentile fallback: p50 is the expected outcome, and the share of
+        # stored quantiles at or under the threshold is a coarse on-time rate.
+        qs = [dist.get(k) for k in ("p50", "p75", "p90", "p95")]
+        qs = [q for q in qs if q is not None]
+        if not qs:
+            return {"assessed": False, "reason": "no usable distribution"}
+        expected = float(dist.get("p50") or 0.0)
+        on_time = sum(1 for q in qs if q <= ON_TIME_MIN) / len(qs)
+        basis_model = "quantiles"
+
+    # A journey you cannot complete is not an on-time journey.
+    for t in itinerary.get("transfers") or []:
+        r = (t.get("risk") or {})
+        if r.get("assessed") and r.get("probability") is not None:
+            on_time *= r["probability"]
+
+    cancel = float(dist.get("cancellation_rate") or 0.0)
+    on_time *= (1.0 - cancel)
+    on_time = max(0.0, min(on_time, 0.99))
+
+    if on_time >= 0.85:
+        label = "reliable"
+    elif on_time >= 0.65:
+        label = "usually fine"
+    elif on_time >= 0.40:
+        label = "risky"
+    else:
+        label = "unreliable"
+    return {
+        "assessed": True,
+        "on_time_chance": round(on_time, 3),
+        "on_time_within_min": ON_TIME_MIN,
+        "expected_delay_min": round(expected, 1),
+        "label": label,
+        "model": basis_model,
+        "basis": dist.get("basis"),
+        "samples": dist.get("sample_count"),
+        "days": dist.get("days_seen"),
+        "cancellation_rate": round(cancel, 4),
+        "data_country": country,
+    }
+
+
 @app.get("/transfer/risk")
 def get_transfer_risk(country: str = "HU", station: str = "", buffer_min: float = 0,
                       feeder_route: str = "", connector_route: str = "",
@@ -1157,6 +1269,9 @@ def _plan_international(cur, origin, destination, date, time_, n):
             "changes": max(0, len(transit) - 1),
             "legs": legs, "transfers": transfers,
         })
+    for _it in itineraries:
+        _it["reliability"] = journey_reliability(cur, "INT", _it)
+    itineraries = _rank_itineraries(itineraries)
     result = {
         "country": "INT",
         "origin": {"name": payload.get("fromResolved"), "display": payload.get("fromResolved")},
@@ -1271,6 +1386,11 @@ def get_plan(country: str = "HU", origin: str = "", destination: str = "",
                 for _t in _it.get("transfers") or []:
                     _t.pop("_arrive_hm", None)
                     _t.pop("_depart_hm", None)
+                _it["reliability"] = journey_reliability(cur, country, _it)
+            # Ordered by how likely each is to work, not by departure time.
+            # A timetable can only sort by clock; this is the ordering a rider
+            # actually wants, and `rank_basis` says which one they are seeing.
+            itineraries = _rank_itineraries(itineraries)
             result = {
                 "country": country,
                 "origin": {"name": frm[1], "display": frm[2]},
@@ -3601,8 +3721,100 @@ def _compensation_lookup(country: str, delay_minutes: float):
     cur.close(); conn.close()
     return row
 
+# Cancellation is not "a very large delay", and the rights differ in kind.
+# Under EU Regulation 2021/782, a cancellation that leaves you 60+ minutes late
+# at your final destination gives a CHOICE that a delay does not:
+#   * a refund within 30 days (full, or the part of the journey not made),
+#     plus return transport to the origin if the cancellation strands you; OR
+#   * re-routing to the destination at the earliest opportunity, at no extra
+#     cost, under comparable conditions.
+# Compensation on top follows the same 25%/50% scale as a delay.
+#
+# The distinction that matters most, and the reason this cannot just reuse the
+# delay path: refund and re-routing are UNCONDITIONAL, while compensation can
+# be refused for extraordinary circumstances (severe weather, sabotage). A
+# strike is explicitly NOT such a circumstance. So a rider told "no
+# compensation" must still be told they can claim their money back.
+# Source: https://europa.eu/youreurope/citizens/travel/passenger-rights/rail/index_en.htm
+_CANCELLATION_THRESHOLD_MIN = 60
+_EU_RAIL_RIGHTS_URL = "https://europa.eu/youreurope/citizens/travel/passenger-rights/rail/index_en.htm"
+
+
+def _cancellation_rights(country, ticket_price=None, resulting_delay=None):
+    """What a cancelled train entitles you to. See the block comment above.
+
+    resulting_delay is how late you ended up at your final destination, which
+    is what the regulation actually keys on - not the fact of cancellation. If
+    the operator re-routed you and you arrived within the hour, the refund
+    right does not arise, and saying otherwise would set someone up for a
+    rejected claim.
+    """
+    result = {
+        "country": country,
+        "cancelled": True,
+        "currency": _COUNTRY_CURRENCY.get(country),
+        "claim_url": _COUNTRY_CLAIM_URL.get(country),
+        "source_url": _EU_RAIL_RIGHTS_URL,
+        "threshold_minutes": _CANCELLATION_THRESHOLD_MIN,
+    }
+    if resulting_delay is None:
+        result.update({
+            "eligible": None,
+            "message": ("A cancelled train gives you rights once it leaves you 60+ minutes "
+                        "late at your final destination. Tell us how late you actually "
+                        "arrived and we can say what you can claim."),
+            "needs": "resulting_delay_minutes",
+        })
+        return result
+
+    result["resulting_delay_minutes"] = resulting_delay
+    if resulting_delay < _CANCELLATION_THRESHOLD_MIN:
+        result.update({
+            "eligible": False,
+            "message": (f"You were re-routed and arrived {resulting_delay:g} minutes late, "
+                        "under the 60-minute threshold, so no refund or compensation "
+                        "right arises from the cancellation itself."),
+        })
+        return result
+
+    # The unconditional half. Stated first and separately, because it survives
+    # an extraordinary-circumstances refusal that kills the compensation.
+    result["choice"] = [
+        {"option": "refund",
+         "detail": ("A refund within 30 days - the full fare, or the part of the journey "
+                    "you did not make - plus a return to where you started if the "
+                    "cancellation left you stranded.")},
+        {"option": "re_routing",
+         "detail": ("Re-routing to your destination at the earliest opportunity under "
+                    "comparable conditions, at no extra cost, or travel rescheduled to "
+                    "a date that suits you.")},
+    ]
+    rule = _compensation_lookup(country, resulting_delay)
+    result["eligible"] = True
+    if rule:
+        pct = float(rule["refund_pct"])
+        result["refund_pct"] = pct
+        result["source_url"] = rule["source_url"] or _EU_RAIL_RIGHTS_URL
+        if ticket_price:
+            result["estimated_refund"] = round(ticket_price * pct / 100, 2)
+        result["message"] = (f"Your train was cancelled and you arrived {resulting_delay:g} "
+                             f"minutes late. You can claim a refund or free re-routing, and "
+                             f"{pct:g}% compensation on top.")
+    else:
+        result["message"] = (f"Your train was cancelled and you arrived {resulting_delay:g} "
+                             "minutes late. You can claim a refund or free re-routing.")
+    result["caveat"] = ("Compensation can be refused for extraordinary circumstances such as "
+                        "severe weather or sabotage - but the refund and re-routing rights "
+                        "hold regardless, and a strike does not count as extraordinary.")
+    return result
+
+
 @app.get("/compensation/check")
-def compensation_check(country: str = "HU", delay_minutes: float = 0, ticket_price: float = None):
+def compensation_check(country: str = "HU", delay_minutes: float = 0,
+                       ticket_price: float = None, cancelled: bool = False,
+                       resulting_delay_minutes: float = None):
+    if cancelled:
+        return _cancellation_rights(country, ticket_price, resulting_delay_minutes)
     rule = _compensation_lookup(country, delay_minutes)
     result = {
         "country": country,

@@ -550,3 +550,59 @@ def test_search_scope_all_dedupes_one_station_held_by_several_feeds():
     assert len(keleti) <= 1, f"duplicated across feeds: {keleti}"
     if keleti:
         assert keleti[0]["country_code"] == "HU"
+
+# --- Journey reliability and cancellation rights -----------------------
+
+def test_plan_ranks_by_reliability_not_departure_time():
+    r = client.get("/plan?country=HU&origin=Debrecen&destination=Sopron"
+                   "&time_=09:00&itineraries=4")
+    assert r.status_code == 200
+    its = r.json()["itineraries"]
+    scored = [i["reliability"]["on_time_chance"] for i in its
+              if (i.get("reliability") or {}).get("assessed")]
+    # Most likely to work first. Assessed ones must be in descending order.
+    assert scored == sorted(scored, reverse=True)
+
+def test_unassessed_journeys_are_not_ranked_as_poor():
+    # No history and a bad record are different things. An itinerary that
+    # cannot be judged sorts after the ones that can, never among them by a
+    # made-up score.
+    its = client.get("/plan?country=HU&origin=Debrecen&destination=Sopron"
+                     "&time_=09:00&itineraries=4").json()["itineraries"]
+    seen_unassessed = False
+    for i in its:
+        assessed = (i.get("reliability") or {}).get("assessed")
+        if not assessed:
+            seen_unassessed = True
+            assert (i.get("reliability") or {}).get("reason")
+        else:
+            assert not seen_unassessed, "an assessed journey sorted after an unassessed one"
+
+def test_cancellation_asks_for_the_figure_the_regulation_keys_on():
+    # The right depends on how late you ended up, not on the cancellation
+    # itself - a re-routed passenger who arrived on time has no claim.
+    b = client.get("/compensation/check?country=HU&cancelled=true").json()
+    assert b["eligible"] is None
+    assert b["needs"] == "resulting_delay_minutes"
+
+def test_cancellation_under_the_threshold_is_not_eligible():
+    b = client.get("/compensation/check?country=HU&cancelled=true"
+                   "&resulting_delay_minutes=25").json()
+    assert b["eligible"] is False
+
+def test_cancellation_always_offers_refund_or_rerouting():
+    # These are unconditional under EU 2021/782 and survive an
+    # extraordinary-circumstances refusal that kills the compensation. A rider
+    # told "no compensation" must still learn they can claim their money back.
+    b = client.get("/compensation/check?country=HU&cancelled=true"
+                   "&resulting_delay_minutes=95&ticket_price=40").json()
+    assert b["eligible"] is True
+    assert {c["option"] for c in b["choice"]} == {"refund", "re_routing"}
+    assert b["refund_pct"] == 25.0 and b["estimated_refund"] == 10.0
+    assert "strike does not count" in b["caveat"]
+    assert b["source_url"]
+
+def test_cancellation_scales_with_the_delay_it_caused():
+    b = client.get("/compensation/check?country=HU&cancelled=true"
+                   "&resulting_delay_minutes=140&ticket_price=40").json()
+    assert b["refund_pct"] == 50.0 and b["estimated_refund"] == 20.0
