@@ -407,6 +407,7 @@ def _normalise_plan(raw, country, cur):
                 "buffer_min": buffer_min,
                 "feeder_route": a["route_name"], "feeder_number": a["train_number"],
                 "connector_route": b["route_name"], "connector_number": b["train_number"],
+                "_arrive_hm": a.get("arrive_hm"), "_depart_hm": b.get("depart_hm"),
                 # Phase 4. Filled per transfer from the stored distributions;
                 # carries its own refusal when no rung is deep enough, so a
                 # consumer can never mistake "not computed" for "no risk".
@@ -623,6 +624,101 @@ def assess_transfer(cur, country, station_name, buffer_min,
         "cancellation_rate": feeder.get("cancellation_rate"),
     }
 
+# When a change is tight, a warning on its own is not actionable - the useful
+# move is to offer the next train that also reaches the destination, with its
+# own risk figure, so the rider can decide rather than just worry.
+#
+# Only the LATER CONNECTOR is offered, not an earlier feeder. Taking an earlier
+# feeder means changing a leg the rider has already started reasoning about and
+# re-planning everything upstream of it; taking a later connector changes one
+# leg, downstream, and is the decision actually available to someone standing
+# on a platform watching their feeder run late.
+#
+# Answered from our own imported stop_times, which every country now has, so it
+# needs no second call to anybody's planner and works identically for HU, AT
+# and PL.
+_SAFER_MAX_OFFERS = 2
+_SAFER_LOOKAHEAD_HOURS = 3
+
+def safer_connectors(cur, country, station_name, dest_name, feeder_arrive_hm,
+                     current_depart_hm, service_date):
+    """Later departures from this station that still reach the destination."""
+    if not (station_name and dest_name and current_depart_hm and feeder_arrive_hm):
+        return []
+    dow = pl_planner._DOW[service_date.weekday()]
+    hi_h = int(current_depart_hm[:2]) + _SAFER_LOOKAHEAD_HOURS
+    hi = f"{hi_h:02d}{current_depart_hm[2:]}:59"
+    cur.execute(f"""
+        SELECT r.name, t.trip_short_name, st.scheduled_departure
+        FROM stop_times st
+        JOIN trips t ON t.id = st.trip_id
+        LEFT JOIN routes r ON r.id = t.route_id
+        JOIN stations s ON s.id = st.station_id
+        JOIN stop_times d ON d.trip_id = t.id AND d.stop_sequence > st.stop_sequence
+        JOIN stations ds ON ds.id = d.station_id
+        WHERE t.country_code = %s AND s.name = %s AND ds.name = %s
+          AND st.scheduled_departure > %s AND st.scheduled_departure <= %s
+          AND NOT EXISTS (SELECT 1 FROM service_date sd
+                          WHERE sd.country_code = t.country_code AND sd.service_id = t.service_id
+                            AND sd.service_date = %s AND NOT sd.added)
+          AND (EXISTS (SELECT 1 FROM service_calendar sc
+                       WHERE sc.country_code = t.country_code AND sc.service_id = t.service_id
+                         AND sc.{dow}
+                         AND (sc.start_date IS NULL OR sc.start_date <= %s)
+                         AND (sc.end_date   IS NULL OR sc.end_date   >= %s))
+               OR EXISTS (SELECT 1 FROM service_date sd
+                          WHERE sd.country_code = t.country_code AND sd.service_id = t.service_id
+                            AND sd.service_date = %s AND sd.added))
+        ORDER BY st.scheduled_departure
+        LIMIT %s
+    """, (country, station_name, dest_name, current_depart_hm + ":00", hi,
+          service_date, service_date, service_date, service_date, _SAFER_MAX_OFFERS * 4))
+    seen, out = set(), []
+    arrive_sec = pl_planner.hms_to_seconds(feeder_arrive_hm + ":00")
+    for route_name, short, dep in cur.fetchall():
+        label = route_name or short
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        dep_sec = pl_planner.hms_to_seconds(dep)
+        if dep_sec is None or arrive_sec is None:
+            continue
+        buffer_min = round((dep_sec - arrive_sec) / 60.0, 1)
+        risk = assess_transfer(cur, country, station_name, buffer_min, None, route_name)
+        out.append({
+            "route_name": route_name, "train_number": short,
+            "depart_hm": pl_planner.seconds_to_hm(dep_sec),
+            "buffer_min": buffer_min,
+            "label": risk.get("label") if risk.get("assessed") else None,
+            "probability": risk.get("probability") if risk.get("assessed") else None,
+        })
+        if len(out) >= _SAFER_MAX_OFFERS:
+            break
+    return out
+
+
+def _attach_safer(cur, country, transfers, dest_name, service_date):
+    """Offer alternatives only where they are actually needed.
+
+    Deliberately not on every transfer: a "comfortable" change with two
+    suggestions attached invites second-guessing a decision that is already
+    fine, and each offer costs a query plus a risk assessment.
+    """
+    for t in transfers:
+        risk = t.get("risk") or {}
+        if not risk.get("assessed") or risk.get("label") not in ("tight", "unlikely"):
+            continue
+        arrive_hm = t.get("_arrive_hm")
+        depart_hm = t.get("_depart_hm")
+        try:
+            t["alternatives"] = safer_connectors(
+                cur, country, t.get("station"), dest_name, arrive_hm, depart_hm, service_date)
+        except Exception as exc:
+            # An alternative that cannot be computed must not take the
+            # itinerary down with it - the warning itself is still useful.
+            print(f"safer_connectors failed at {t.get('station')}: {exc}")
+            t["alternatives"] = []
+
 @app.get("/transfer/risk")
 def get_transfer_risk(country: str = "HU", station: str = "", buffer_min: float = 0,
                       feeder_route: str = "", connector_route: str = "",
@@ -692,6 +788,7 @@ def _normalise_plan_at(raw, country, cur):
                 "buffer_min": buffer_min,
                 "feeder_route": a["route_name"], "feeder_number": a["train_number"],
                 "connector_route": b["route_name"], "connector_number": b["train_number"],
+                "_arrive_hm": a.get("arrive_hm"), "_depart_hm": b.get("depart_hm"),
                 "risk": assess_transfer(cur, country, a["to"], buffer_min,
                                         a["route_name"], b["route_name"]),
             })
@@ -766,6 +863,8 @@ def _normalise_plan_pl(cur, origin_id, destination_id, service_date, from_sec, n
                 "arrive": None, "depart": None, "buffer_min": buffer_min,
                 "feeder_route": a["route_name"], "feeder_number": a.get("trip_short_name"),
                 "connector_route": b["route_name"], "connector_number": b.get("trip_short_name"),
+                "_arrive_hm": pl_planner.seconds_to_hm(a["arrive_sec"]),
+                "_depart_hm": pl_planner.seconds_to_hm(b["depart_sec"]),
                 "risk": assess_transfer(cur, "PL", station_name, buffer_min,
                                         a["route_name"], b["route_name"]),
             })
@@ -872,6 +971,13 @@ def get_plan(country: str = "HU", origin: str = "", destination: str = "",
                                         detail=f"MÁV's planner rejected the query: {body['errors'][:1]}")
                 raw = ((body.get("data") or {}).get("plan") or {}).get("itineraries") or []
                 itineraries = _normalise_plan(raw, country, cur)
+            dest_name = to[1]
+            svc_date = datetime.strptime(date, "%Y-%m-%d").date()
+            for _it in itineraries:
+                _attach_safer(cur, country, _it.get("transfers") or [], dest_name, svc_date)
+                for _t in _it.get("transfers") or []:
+                    _t.pop("_arrive_hm", None)
+                    _t.pop("_depart_hm", None)
             result = {
                 "country": country,
                 "origin": {"name": frm[1], "display": frm[2]},

@@ -448,3 +448,35 @@ def test_plan_supports_every_registered_planner_country():
     assert set(api._PLAN_PROVIDERS) == {"HU", "AT", "PL"}
     for c in api._PLAN_PROVIDERS:
         assert client.get(f"/plan?country={c}&origin=X").status_code != 501
+
+# --- Safer-train suggestions ------------------------------------------
+
+def test_safer_connectors_are_offered_only_for_a_tight_change():
+    # Attaching alternatives to a comfortable change invites second-guessing a
+    # decision that is already fine, and costs a query plus a risk assessment
+    # each. The presence of the block is itself the signal.
+    r = client.get("/plan?country=PL&origin=Warszawa Centralna"
+                   "&destination=Kraków Główny&time_=08:00&itineraries=3")
+    assert r.status_code == 200
+    for it in r.json()["itineraries"]:
+        for t in it["transfers"]:
+            risk = t.get("risk") or {}
+            if t.get("alternatives"):
+                assert risk.get("label") in ("tight", "unlikely")
+
+def test_safer_connectors_actually_give_more_buffer():
+    # An "alternative" that leaves sooner than the one already listed is not an
+    # alternative, it is a worse option wearing the same label.
+    r = client.get("/plan?country=PL&origin=Warszawa Centralna"
+                   "&destination=Kraków Główny&time_=08:00&itineraries=3")
+    for it in r.json()["itineraries"]:
+        for t in it["transfers"]:
+            for alt in t.get("alternatives") or []:
+                assert alt["buffer_min"] > t["buffer_min"]
+
+def test_plan_never_leaks_its_internal_time_keys():
+    r = client.get("/plan?country=PL&origin=Warszawa Centralna"
+                   "&destination=Kraków Główny&time_=08:00&itineraries=2")
+    for it in r.json()["itineraries"]:
+        for t in it["transfers"]:
+            assert "_arrive_hm" not in t and "_depart_hm" not in t

@@ -450,6 +450,16 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 .xfer-risk.sev-late b{color:var(--sev-late)}
 .xfer-risk.sev-bad b{color:var(--sev-bad)}
 .xfer-unknown b{color:var(--text-dim)}
+.xfer-alts{margin-top:8px;padding-top:6px;border-top:1px dashed var(--border)}
+.xfer-alts-h{font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-bottom:4px}
+.xfer-alt{display:flex;gap:10px;align-items:baseline;font:12px var(--font-mono);padding:2px 0;flex-wrap:wrap}
+.xfer-alt-t{font-weight:700;flex:0 0 44px}
+.xfer-alt-r{flex:0 0 auto}
+.xfer-alt-b{color:var(--text-dim)}
+.xfer-alt-l{font-weight:700;text-transform:capitalize}
+.xfer-alt-l.sev-ok{color:var(--sev-ok)}
+.xfer-alt-l.sev-late{color:var(--sev-late)}
+.xfer-alt-l.sev-bad{color:var(--sev-bad)}
 </style>
 </head>
 <body>
@@ -787,6 +797,20 @@ function renderRisk(r){
       'Assumes '+r.interchange_min+' min to change platforms \u2014 no feed publishes a real figure for this country.</span>'+
     '</div>';
 }
+// A tight change with no way out is just anxiety. These are only present when
+// the risk layer judged the change tight or unlikely, so the mere existence of
+// this block is the signal - it is never rendered for a change that is fine.
+function renderAlternatives(alts){
+  if(!alts||!alts.length)return '';
+  return '<div class="xfer-alts"><div class="xfer-alts-h">Later trains that also get you there</div>'+
+    alts.map(function(a){
+      var cls=PLAN_RISK_CLASS[a.label]||'';
+      return '<div class="xfer-alt"><span class="xfer-alt-t">'+esc(a.depart_hm||'')+'</span>'+
+        '<span class="xfer-alt-r">'+esc(a.route_name||a.train_number||'')+'</span>'+
+        '<span class="xfer-alt-b">'+(a.buffer_min!=null?a.buffer_min+' min to connect':'')+'</span>'+
+        (a.label?'<span class="xfer-alt-l '+cls+'">'+esc(a.label)+'</span>':'')+'</div>';
+    }).join('')+'</div>';
+}
 function renderPlan(el,d){
   var its=d.itineraries||[];
   if(!its.length){el.innerHTML='<div class="empty-msg">No journeys found for that time.</div>';return;}
@@ -813,7 +837,8 @@ function renderPlan(el,d){
     });
     (it.transfers||[]).forEach(function(t){
       html+='<div class="plan-xfer"><div class="xfer-head">Change at <b>'+esc((t.risk&&t.risk.station_display)||t.station||'')+'</b>'+
-        ' \u00b7 '+(t.buffer_min!=null?t.buffer_min+' min to connect':'')+'</div>'+renderRisk(t.risk)+'</div>';
+        ' \u00b7 '+(t.buffer_min!=null?t.buffer_min+' min to connect':'')+'</div>'+renderRisk(t.risk)+
+        renderAlternatives(t.alternatives)+'</div>';
     });
     html+='</div>';
   });
