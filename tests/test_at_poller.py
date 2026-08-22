@@ -131,3 +131,35 @@ def test_resolve_trip_id_returns_none_when_not_found():
 def test_resolve_trip_id_returns_the_single_match():
     cur = _FakeCursor([(101,)])
     assert resolve_trip_id(cur, "639") == 101
+
+
+def test_parse_at_vehicles_keeps_a_train_with_no_delay_published():
+    # 380 of 1,033 moving trains - 37% - had neither an arrivalDelay nor a
+    # departureDelay on their next stopover and were being dropped entirely,
+    # making more than a third of Austria's live map invisible. They are not
+    # cancelled and not buses; OBB simply has not published a figure yet.
+    rows = parse_at_vehicles([{
+        "tripId": "2|#VN#1#ST#1787300919#PI#0#ZI#99999#TA#0#DA#220826#",
+        "line": {"name": "RJ 999", "mode": "train"},
+        "direction": "Wien Hbf",
+        "location": {"latitude": 47.0, "longitude": 15.0},
+        "nextStopovers": [{"stop": {"name": "Graz Hbf"}}],
+    }])
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["delay_minutes"] is None
+    # NULL delay with is_cancelled False is a different state from a
+    # cancellation, and renders as "Unknown" rather than "On time".
+    assert row["is_cancelled"] is False
+    assert row["cancellation_kind"] is None
+
+
+def test_hafas_journey_id_survives_the_changing_timestamp():
+    # The full tripId embeds a server timestamp (#ST#) that changes every
+    # poll, so it identifies a sighting rather than a train. #ZI# is stable.
+    from austria_poller import hafas_journey_id
+    a = "2|#VN#1#ST#1787300919#PI#0#ZI#82533#TA#0#DA#220826#"
+    b = "2|#VN#1#ST#1787399999#PI#0#ZI#82533#TA#0#DA#220826#"
+    assert hafas_journey_id(a) == hafas_journey_id(b) == "82533"
+    assert hafas_journey_id(None) is None
+    assert hafas_journey_id("nonsense") is None

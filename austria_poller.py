@@ -65,6 +65,24 @@ def resolve_trip_id(cur, number, stop_name=None, delay_minutes=None, now=None):
     station_names = station_name_candidates(stop_name) if stop_name else None
     return resolve_ambiguous_trip(cur, COUNTRY_CODE, matches, station_names, delay_minutes, now)
 
+def hafas_journey_id(trip_id):
+    """The stable journey id inside a HAFAS tripId.
+
+    A tripId looks like
+        2|#VN#1#ST#1787300919#PI#0#ZI#82533#TA#0#DA#220826#...
+    and the #ST# field is a server timestamp that changes between calls, so
+    the whole string identifies a *sighting*, not a train. #ZI# is the journey
+    and stays put. Split on '#': the value after 'ZI'.
+    """
+    if not trip_id:
+        return None
+    parts = trip_id.split("#")
+    for i, part in enumerate(parts):
+        if part == "ZI" and i + 1 < len(parts):
+            return parts[i + 1]
+    return None
+
+
 def call_radar():
     result = subprocess.run(
         ["node", "hafas/radar.js"],
@@ -148,13 +166,27 @@ def parse_at_vehicles(movements):
         # AT is known to have coverage. See
         # schema/005_cancellations_platform.sql.
         is_cancelled = bool(stop.get("cancelled"))
-        if not stop_name or (delay_seconds is None and not is_cancelled):
+        # A train with no delay figure is still a train. Measured on a live
+        # radar call: 380 of 1,033 moving trains - 37% - had neither an
+        # arrivalDelay nor a departureDelay on their next stopover, and every
+        # one of them was dropped here. They are not cancelled, not buses and
+        # not unnamed; OBB simply has not published a figure for that stopover
+        # yet. Dropping them made more than a third of Austria's live map
+        # invisible and left their existence unrecorded.
+        #
+        # They are written with delay_minutes NULL and is_cancelled false,
+        # which is a different state from a cancellation (NULL and true) and
+        # renders as "Unknown" rather than "On time" - sevInfo(null) in
+        # index.html already does the right thing. percentile_cont ignores
+        # NULLs, so they cannot skew a delay distribution either.
+        if not stop_name:
             continue
         location = m.get("location") or {}
         rows.append({
             "stop_name": stop_name,
             "route_name": route_name,
-            "delay_minutes": None if is_cancelled else round(delay_seconds / 60, 2),
+            "delay_minutes": None if (is_cancelled or delay_seconds is None)
+                             else round(delay_seconds / 60, 2),
             "delay_arrival_minutes": None if (is_cancelled or arrival_delay is None) else round(arrival_delay / 60, 2),
             "delay_departure_minutes": None if (is_cancelled or departure_delay is None) else round(departure_delay / 60, 2),
             "is_cancelled": is_cancelled,
@@ -195,9 +227,62 @@ def poll():
     movements = call_radar()
     rows = parse_at_vehicles(movements)
     print(f"Got {len(rows)} vehicles")
+
+    # Dedup, which AT has never had. PL and DE skip an INSERT when a trip's
+    # delay has not changed since the last poll (the fix that took
+    # delay_observations from 54M rows to 15.3M); Austria wrote every train
+    # every five minutes regardless, ~75,600 rows/day. That was affordable
+    # only while 37% of its trains were being silently dropped - now that they
+    # are recorded, unconditional writing would push AT past 185,000/day for
+    # no extra information.
+    #
+    # Keyed on the journey id INSIDE the HAFAS tripId, not the tripId itself.
+    # The full identifier is not stable across polls - it embeds a server
+    # timestamp (#ST#), so the same physical train arrives wearing a different
+    # id every five minutes. Measured: 1,440 rows in fifteen minutes carried
+    # 438 distinct tripIds, one train alone accounting for five of them, and a
+    # dedup keyed on the whole string skipped almost nothing. The #ZI# field
+    # is the journey id and does hold still, which is why hafas_journey_id()
+    # pulls it out. trip_id is no good either: it resolves for barely half of
+    # AT's vehicles (NOTES.md, "Live per-train identity"), so keying on it
+    # would treat every unresolved train as brand new.
+    for r in rows:
+        r["_zi"] = hafas_journey_id(r.get("live_trip_id"))
+    keys = [(r["_zi"], r.get("stop_name")) for r in rows if r["_zi"]]
+    last_state = {}
+    if keys:
+        cur.execute("""
+            SELECT DISTINCT ON (split_part(o.live_trip_id, '#', 9), s.name)
+                   split_part(o.live_trip_id, '#', 9), s.name,
+                   o.delay_minutes, o.is_cancelled
+            FROM delay_observations o
+            JOIN stations s ON s.id = o.station_id
+            WHERE o.country_code = %s AND o.observed_date = %s
+              AND split_part(o.live_trip_id, '#', 9) = ANY(%s)
+            ORDER BY split_part(o.live_trip_id, '#', 9), s.name, o.id DESC
+        """, (COUNTRY_CODE, date.today(), [k[0] for k in keys]))
+        last_state = {(r[0], r[1]): (r[2], bool(r[3])) for r in cur.fetchall()}
+
     count = 0
     resolved_count = 0
+    skipped = 0
+    unknown = 0
     for row in rows:
+        # A train OBB has published no delay for is kept in the live feed -
+        # parse_at_vehicles emits it, and /live?country=AT reads that parser
+        # directly, so the map now shows all 1,064 moving trains instead of
+        # 653. It is not written to history, though: delay_minutes NULL
+        # contributes nothing to a delay distribution (percentile_cont ignores
+        # NULLs) and there are ~380 of them per poll, which would have tripled
+        # Austria's stored rows to buy no answerable question. A cancellation
+        # is different and always stored - that IS the information.
+        if row["delay_minutes"] is None and not row["is_cancelled"]:
+            unknown += 1
+            continue
+        prev = last_state.get((row.get("_zi"), row.get("stop_name")))
+        if prev is not None and prev == (row["delay_minutes"], row["is_cancelled"]):
+            skipped += 1
+            continue
         state = "CANCELLED" if row["is_cancelled"] else row["delay_minutes"]
         print(f"  {row['route_name']} at {row['stop_name']}: {state}")
         # Real GPS straight off HAFAS's radar (not the schedule-interpolated
@@ -234,7 +319,8 @@ def poll():
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Saved {count} observations, {resolved_count} with a resolved trip_id.")
+    print(f"Saved {count} observations, {resolved_count} with a resolved trip_id, "
+          f"skipped {skipped} unchanged and {unknown} with no delay published.")
 
 if __name__ == "__main__":
     poll()
