@@ -1370,7 +1370,8 @@ def get_distribution(country: str = "HU", station: str = "", trip_id: int = None
     return base
 
 @app.get("/search")
-def search(q: str, country: str = "HU", limit: int = 10, kind: str = None):
+def search(q: str, country: str = "HU", limit: int = 10, kind: str = None,
+           scope: str = "country"):
     """Typo-tolerant station and route search.
 
     Replaces the frontend's client-side substring match, which required an
@@ -1378,6 +1379,14 @@ def search(q: str, country: str = "HU", limit: int = 10, kind: str = None):
     blends trigram similarity with how much data we actually hold for the
     name, so a busy main station outranks a rural halt whose name happens to
     score marginally higher.
+
+    scope="all" searches every country at once and labels each result with the
+    one it came from. The default stays country-scoped so nothing that already
+    calls this changes behaviour, but the whole point of a four-country site is
+    that a rider looking for Wien while reading Hungarian delays should find
+    it. Cross-country results are deduplicated the same way the cross-border
+    planner resolves stations - by observation depth - because a foreign
+    terminus appears in several feeds and only one copy has any history.
     """
     raw = (q or "").strip()
     if not raw:
@@ -1406,14 +1415,14 @@ def search(q: str, country: str = "HU", limit: int = 10, kind: str = None):
         # and weighted 0.25 so popularity can break a near-tie but never
         # outrank a genuinely better textual match.
         cur.execute("""
-            SELECT kind, name, display_name, observations,
+            SELECT kind, name, display_name, observations, country_code,
                    GREATEST(
                        word_similarity(%(q)s, search_text),
                        similarity(%(q)s, search_text)
                    ) AS score,
                    (search_text LIKE %(like)s) AS substring_hit
             FROM search_index
-            WHERE country_code = %(country)s
+            WHERE (%(country)s::text IS NULL OR country_code = %(country)s)
               AND (%(kind)s::text IS NULL OR kind = %(kind)s)
               AND (
                     search_text LIKE %(like)s
@@ -1429,17 +1438,41 @@ def search(q: str, country: str = "HU", limit: int = 10, kind: str = None):
                      ) DESC,
                      observations DESC
             LIMIT %(limit)s
-        """, {"q": needle, "like": f"%{needle}%", "country": country,
-              "kind": kind, "limit": limit})
+        """, {"q": needle, "like": f"%{needle}%",
+              "country": None if scope == "all" else country,
+              "kind": kind, "limit": limit * (4 if scope == "all" else 1)})
         rows = [dict(r) for r in cur.fetchall()]
     finally:
         cur.close()
         conn.close()
 
+    if scope == "all":
+        # One physical station can exist in several feeds - Budapest-Keleti is
+        # in AT's, DE's and HU's - and showing it three times, twice with no
+        # history behind it, is worse than useless. Keep the deepest copy,
+        # which is the same rule resolve_station_anywhere applies.
+        best = {}
+        for r in rows:
+            # "Hauptbahnhof" and "Hbf" are the same word in two feeds'
+            # spellings, so fold one into the other before comparing -
+            # otherwise Muenchen appears twice, as AT's "Muenchen
+            # Hauptbahnhof" (72,793 observations) and DE's "Muenchen Hbf"
+            # (11,691), which is one station wearing two hats.
+            canon = normalize_search_text(r["display_name"] or r["name"])
+            canon = canon.replace("hauptbahnhof", "hbf").replace("glowny", "gl")
+            key = (r["kind"], canon)
+            keep = best.get(key)
+            if keep is None or (r["observations"] or 0) > (keep["observations"] or 0):
+                best[key] = r
+        rows = sorted(best.values(),
+                      key=lambda r: (-(float(r["score"] or 0)
+                                       + min((r["observations"] or 0) and
+                                             __import__("math").log((r["observations"] or 0) + 1) / 14.0, 1.0) * 0.25),
+                                     -(r["observations"] or 0)))[:limit]
     for r in rows:
         r["score"] = round(float(r["score"] or 0), 3)
         r["label"] = r["display_name"] or r["name"]
-    return {"query": raw, "country": country, "results": rows}
+    return {"query": raw, "country": country, "scope": scope, "results": rows}
 
 @app.get("/countries")
 def get_countries():

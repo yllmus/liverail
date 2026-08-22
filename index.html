@@ -460,6 +460,9 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 .xfer-alt-l.sev-ok{color:var(--sev-ok)}
 .xfer-alt-l.sev-late{color:var(--sev-late)}
 .xfer-alt-l.sev-bad{color:var(--sev-bad)}
+.sres-other-h{padding:6px 14px 4px;font:700 10px var(--font-mono);text-transform:uppercase;
+  letter-spacing:.06em;color:var(--text-dim);border-top:1px solid var(--border);background:var(--bg)}
+.stag-cc{color:var(--accent-ink)!important;background:var(--accent);border-radius:4px;padding:2px 5px}
 </style>
 </head>
 <body>
@@ -1165,21 +1168,57 @@ function searchNames(term,only,limit){
     });
   }).catch(function(){return [];});
 }
+/* Cross-country matches, as a clearly separate group.
+   Kept apart from searchNames() on purpose: every caller of that function
+   feeds `name` straight into /station/{name}?country=state.country, so a
+   foreign result returned in the same list would be looked up against the
+   wrong country and quietly show nothing. These carry their own country and
+   the picker switches to it before opening them. */
+function searchOtherCountries(term,only,limit){
+  term=(term||'').trim();
+  if(!term)return Promise.resolve([]);
+  var p={country:state.country,q:term,scope:'all',limit:limit||6};
+  if(only)p.kind=only;
+  return api('/search',p).then(function(d){
+    return (d.results||[]).filter(function(r){return r.country_code!==state.country;})
+      .map(function(r){
+        return {type:r.kind,name:r.name,label:r.label||r.name,country:r.country_code,obs:r.observations};
+      }).slice(0,3);
+  }).catch(function(){return [];});
+}
 function wireSearch(inputId,popId,onPick,only){
   var input=document.getElementById(inputId),pop=document.getElementById(popId),seq=0;
   input.addEventListener('input',debounce(function(){
     var term=input.value.trim();
     if(!term){pop.innerHTML='';pop.classList.remove('open');return;}
     var mine=++seq;
-    searchNames(term,only).then(function(res){
+    Promise.all([searchNames(term,only),searchOtherCountries(term,only)]).then(function(both){
       if(mine!==seq)return;   // a later keystroke already won
-      if(!res.length){pop.innerHTML='<div class="sres-empty">No matches in '+state.country+'.</div>';pop.classList.add('open');return;}
+      var res=both[0],other=both[1];
+      if(!res.length&&!other.length){pop.innerHTML='<div class="sres-empty">No matches in '+state.country+'.</div>';pop.classList.add('open');return;}
+      var all=res.concat(other);
       pop.innerHTML=res.map(function(r,i){
         return '<div class="sres" data-i="'+i+'"><span class="stag">'+(r.type==='station'?'Stn':'Rte')+'</span><span class="sname">'+esc(r.label)+'</span></div>';
-      }).join('');
+      }).join('')+
+      (other.length?('<div class="sres-other-h">In other countries</div>'+other.map(function(r,i){
+        return '<div class="sres" data-i="'+(res.length+i)+'"><span class="stag stag-cc">'+esc(r.country)+'</span>'+
+          '<span class="sname">'+esc(r.label)+'</span>'+
+          '<span class="sres-meta">'+(r.obs?Number(r.obs).toLocaleString():'')+'</span></div>';
+      }).join('')):'');
+      res=all;
       pop.classList.add('open');
       Array.prototype.forEach.call(pop.querySelectorAll('.sres'),function(el,i){
-        el.addEventListener('click',function(){onPick(res[i]);pop.classList.remove('open');input.value='';});
+        el.addEventListener('click',function(){
+          var pick=res[i];
+          pop.classList.remove('open');input.value='';
+          // A cross-country pick has to switch country first, or the handler
+          // looks the name up against the country still selected and finds
+          // nothing. setCountry() reloads the panels, so open after it.
+          if(pick&&pick.country&&pick.country!==state.country){
+            setCountry(pick.country);
+            setTimeout(function(){onPick(pick);},60);
+          }else{onPick(pick);}
+        });
       });
     });
   },200));

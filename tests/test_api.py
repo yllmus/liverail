@@ -523,3 +523,25 @@ def test_resolve_station_anywhere_returns_none_for_a_country_we_do_not_import():
     finally:
         cur.close(); conn.close()
     assert row is None
+
+def test_search_scope_all_crosses_countries():
+    # The point of a four-country site: someone reading Hungarian delays who
+    # searches for Wien should find it.
+    b = client.get("/search?q=Wien&country=HU&scope=all&limit=5").json()
+    assert b["scope"] == "all"
+    assert any(r["country_code"] == "AT" for r in b["results"])
+
+def test_search_default_scope_is_unchanged():
+    # Every existing caller passes no scope and must keep country-only
+    # behaviour - a silent widening would change what the whole frontend shows.
+    b = client.get("/search?q=Wien&country=HU&limit=5").json()
+    assert b["scope"] == "country"
+    assert all(r.get("country_code") == "HU" for r in b["results"])
+
+def test_search_scope_all_dedupes_one_station_held_by_several_feeds():
+    # Budapest-Keleti is in AT's, DE's and HU's imports; only HU's has history.
+    b = client.get("/search?q=Budapest-Keleti&country=AT&scope=all&limit=8").json()
+    keleti = [r for r in b["results"] if "keleti" in (r["label"] or "").lower()]
+    assert len(keleti) <= 1, f"duplicated across feeds: {keleti}"
+    if keleti:
+        assert keleti[0]["country_code"] == "HU"
