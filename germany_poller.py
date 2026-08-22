@@ -91,57 +91,71 @@ def parse_de_vehicles(feed):
         gtfs_trip_id = trip_update.trip.trip_id
         if not gtfs_trip_id or not trip_update.stop_time_update:
             continue
-        # First stop_time_update only - one "current" delay figure per trip
-        # per poll, same choice AT's nextStopovers[0] and PL's stu[0] make.
-        stu = trip_update.stop_time_update[0]
-        gtfs_stop_id = stu.stop_id
-
-        # gtfs.de never uses the trip-level CANCELED flag (confirmed 0/7229),
-        # so a fully cancelled train is only recognizable as one whose stops
-        # are *all* SKIPPED - 508 trips in a real poll, against 731 with at
-        # least one skipped stop. Both were silently dropped before this: a
-        # skipped stop publishes no delay, so it failed the delay check below.
-        skipped = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED
-        if stu.schedule_relationship == skipped:
-            all_skipped = all(
-                s.schedule_relationship == skipped for s in trip_update.stop_time_update
-            )
-            if gtfs_stop_id:
-                rows.append({
-                    "gtfs_trip_id": gtfs_trip_id,
-                    "gtfs_stop_id": gtfs_stop_id,
-                    "delay_minutes": None,
-                    "start_date": trip_update.trip.start_date or None,
-                    "cancellation_kind": "trip" if all_skipped else "stop",
-                })
-            continue
-
-        # Split as well as collapsed: a transfer needs the feeder's ARRIVAL
-        # and the connector's DEPARTURE, which differ at any stop where the
-        # train waits. delay_seconds keeps its original arrival-preferred
-        # meaning so delay_minutes and every existing caller are unchanged.
-        arrival_delay = stu.arrival.delay if (stu.HasField("arrival") and stu.arrival.HasField("delay")) else None
-        departure_delay = stu.departure.delay if (stu.HasField("departure") and stu.departure.HasField("delay")) else None
-        delay_seconds = arrival_delay if arrival_delay is not None else departure_delay
-        if not gtfs_stop_id or delay_seconds is None:
-            continue
-        delay_minutes = round(delay_seconds / 60, 2)
-        if abs(delay_minutes) > MAX_PLAUSIBLE_DELAY_MIN:
-            continue
-        rows.append({
-            "gtfs_trip_id": gtfs_trip_id,
-            "gtfs_stop_id": gtfs_stop_id,
-            "delay_minutes": delay_minutes,
-            "delay_arrival_minutes": None if arrival_delay is None else round(arrival_delay / 60, 2),
-            "delay_departure_minutes": None if departure_delay is None else round(departure_delay / 60, 2),
-            # Needed to turn a scheduled stop_times HH:MM:SS into an actual
-            # epoch for position estimation (see resolve_delays) - not used
-            # for the delay figure itself, which stays feed-native.
-            "start_date": trip_update.trip.start_date or None,
-            "cancellation_kind": None,
-        })
+        # EVERY stop_time_update, not just the first. This diverges from AT's
+        # nextStopovers[0] and PL's stu[0] on purpose, because gtfs.de behaves
+        # differently from both: it publishes only a trip's REMAINING stops, so
+        # the "first" one advances as the train runs. Sampling it alone
+        # scattered observations thinly across a journey instead of building
+        # depth anywhere - measured before this change, DE held 25,734
+        # route-station pairs averaging 3.4 days each and exactly ONE pair with
+        # 14+ days, against Poland's 7,544 deep pairs from the same feed
+        # format. Per-stop delay distributions cannot be built from that.
+        #
+        # The write cost is bounded not by this loop but by the dedup below,
+        # which is keyed per (trip, stop): a stop is written when its own
+        # predicted delay changes, not once per poll.
+        for stu in trip_update.stop_time_update:
+            _emit_stop(rows, trip_update, gtfs_trip_id, stu)
     return rows
 
+def _emit_stop(rows, trip_update, gtfs_trip_id, stu):
+    """Append at most one row for a single stop_time_update."""
+    gtfs_stop_id = stu.stop_id
+
+    # gtfs.de never uses the trip-level CANCELED flag (confirmed 0/7229),
+    # so a fully cancelled train is only recognizable as one whose stops
+    # are *all* SKIPPED - 508 trips in a real poll, against 731 with at
+    # least one skipped stop. Both were silently dropped before this: a
+    # skipped stop publishes no delay, so it failed the delay check below.
+    skipped = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED
+    if stu.schedule_relationship == skipped:
+        all_skipped = all(
+            s.schedule_relationship == skipped for s in trip_update.stop_time_update
+        )
+        if gtfs_stop_id:
+            rows.append({
+                "gtfs_trip_id": gtfs_trip_id,
+                "gtfs_stop_id": gtfs_stop_id,
+                "delay_minutes": None,
+                "start_date": trip_update.trip.start_date or None,
+                "cancellation_kind": "trip" if all_skipped else "stop",
+            })
+        return
+
+    # Split as well as collapsed: a transfer needs the feeder's ARRIVAL
+    # and the connector's DEPARTURE, which differ at any stop where the
+    # train waits. delay_seconds keeps its original arrival-preferred
+    # meaning so delay_minutes and every existing caller are unchanged.
+    arrival_delay = stu.arrival.delay if (stu.HasField("arrival") and stu.arrival.HasField("delay")) else None
+    departure_delay = stu.departure.delay if (stu.HasField("departure") and stu.departure.HasField("delay")) else None
+    delay_seconds = arrival_delay if arrival_delay is not None else departure_delay
+    if not gtfs_stop_id or delay_seconds is None:
+        return
+    delay_minutes = round(delay_seconds / 60, 2)
+    if abs(delay_minutes) > MAX_PLAUSIBLE_DELAY_MIN:
+        return
+    rows.append({
+        "gtfs_trip_id": gtfs_trip_id,
+        "gtfs_stop_id": gtfs_stop_id,
+        "delay_minutes": delay_minutes,
+        "delay_arrival_minutes": None if arrival_delay is None else round(arrival_delay / 60, 2),
+        "delay_departure_minutes": None if departure_delay is None else round(departure_delay / 60, 2),
+        # Needed to turn a scheduled stop_times HH:MM:SS into an actual
+        # epoch for position estimation (see resolve_delays) - not used
+        # for the delay figure itself, which stays feed-native.
+        "start_date": trip_update.trip.start_date or None,
+        "cancellation_kind": None,
+    })
 def _scheduled_epoch(start_date, hms):
     # Mirrors poland_poller.py's helper (Europe/Berlin instead of Warsaw).
     # start_date: "YYYYMMDD" (GTFS-RT TripDescriptor format). hms: GTFS's
@@ -319,20 +333,28 @@ def poll():
     # poland_poller.py for why the delay alone is not enough once a row can be
     # cancelled (a cancellation carries delay NULL, and NULL == NULL here
     # would otherwise re-write an identical cancelled row every 5 minutes).
+    # Keyed per (trip, stop), not per trip. Since parse_de_vehicles now emits
+    # every remaining stop rather than only the current one, a trip-level key
+    # would compare a stop's delay against a different stop's last value and
+    # write on nearly every comparison - the dedup would stop working exactly
+    # when it started mattering. This is also what bounds the extra volume:
+    # a stop is written when its own prediction changes, not once per poll.
     trip_ids = [row["trip_id"] for row in resolved]
     cur.execute("""
-        SELECT DISTINCT ON (trip_id) trip_id, delay_minutes, is_cancelled
+        SELECT DISTINCT ON (trip_id, stop_sequence) trip_id, stop_sequence,
+               delay_minutes, is_cancelled
         FROM delay_observations
         WHERE trip_id = ANY(%s) AND observed_date = %s
-        ORDER BY trip_id, id DESC
+        ORDER BY trip_id, stop_sequence, id DESC
     """, (trip_ids, date.today()))
-    last_state = {r[0]: (r[1], bool(r[2])) for r in cur.fetchall()}
+    last_state = {(r[0], r[1]): (r[2], bool(r[3])) for r in cur.fetchall()}
 
     count = 0
     skipped = 0
     cancelled_count = 0
     for row in resolved:
-        if last_state.get(row["trip_id"]) == (row["delay_minutes"], row["is_cancelled"]):
+        if last_state.get((row["trip_id"], row.get("stop_sequence"))) == (
+                row["delay_minutes"], row["is_cancelled"]):
             skipped += 1
             continue
         if row["is_cancelled"]:
