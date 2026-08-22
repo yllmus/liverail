@@ -67,6 +67,10 @@
 !schema/012_delay_distribution.sql
 !schema/013_service_dates.sql
 !schema/014_delay_mixture.sql
+!schema/015_model_registry.sql
+!schema/016_resolve_history.sql
+!model_loop.py
+!tests/test_model_loop.py
 !transfer_backtest.py
 !pl_planner.py
 !tests/test_pl_planner.py

@@ -230,6 +230,56 @@ def _spread_sample(rows, size=400):
     return rows[::step][:size]
 
 
+# How far below its own trailing median a country's resolve ratio may fall
+# before this complains. Relative, not absolute, because 13.6% is healthy for
+# Germany and catastrophic for Poland.
+DECAY_RATIO = 0.70
+DECAY_MIN_SAMPLES = 8
+
+
+def _record_and_check_decay(results, country, ratio, detail):
+    """Log the resolve ratio and compare it to this country's own history.
+
+    The fixed floor above catches a collapse. This catches a DECAY, which is
+    the shape that actually went unnoticed: Poland ran at 70.9% against a 50%
+    floor for about three weeks - never alerting, while 29% of its trains went
+    unrecorded, because a static import had drifted three weeks stale. The
+    median is used rather than the mean so one bad poll cannot move the
+    baseline, and the baseline deliberately excludes the last 6 hours so a
+    sustained outage cannot quietly redefine "normal" as itself.
+    """
+    conn = _conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""INSERT INTO resolve_history
+                       (country_code, feed_rows, resolved_rows, ratio)
+                       VALUES (%s, %s, %s, %s)""",
+                    (country, 0, 0, float(ratio)))
+        cur.execute("""
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY ratio), count(*)
+            FROM resolve_history
+            WHERE country_code = %s
+              AND measured_at < now() - interval '6 hours'
+              AND measured_at > now() - interval '21 days'
+        """, (country,))
+        median, n = cur.fetchone()
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    if not n or n < DECAY_MIN_SAMPLES or not median:
+        _check(results, country, "resolve_trend", OK,
+               f"{ratio:.1%} (building baseline, {n or 0} samples)")
+        return
+    if ratio < median * DECAY_RATIO:
+        _check(results, country, "resolve_trend", WARN,
+               f"{ratio:.1%} is well below this country's usual {median:.1%} "
+               f"- a static feed drifting stale looks exactly like this")
+    else:
+        _check(results, country, "resolve_trend", OK,
+               f"{ratio:.1%} vs usual {median:.1%}")
+
+
 def _check_gtfs_rt(results, country, feed, resolve_ratio_fn):
     header_age = None
     if feed.header.timestamp:
@@ -247,6 +297,7 @@ def _check_gtfs_rt(results, country, feed, resolve_ratio_fn):
         age_txt = f"{header_age:.0f} min old" if header_age is not None else "no timestamp"
         _check(results, country, "feed", OK, f"{len(entities)} trip updates, {age_txt}")
     ratio, detail = resolve_ratio_fn(entities)
+    _record_and_check_decay(results, country, ratio, detail)
     floor = MIN_RESOLVE_RATIO[country]
     if ratio < floor:
         _check(results, country, "resolution", CRIT,
