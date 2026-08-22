@@ -1429,6 +1429,18 @@ function renderTrainHistory(el,h){
 // Medians and p90s rather than means - delay distributions are right-skewed,
 // and p90 is the figure that decides whether a connection is makeable.
 function fmtStopDelay(v){return v==null?'\u2014':(v>0?'+':'')+fmtNum(v,1);}
+// GTFS wall-clock legitimately runs past 24:00:00 for services continuing
+// overnight (a real observed value here is "26:56:00"). schema/008 stores the
+// raw string on purpose - converting needs the service date, which only PL
+// publishes - but showing a rider "26:56" is simply wrong, so normalise for
+// display only and mark that it is the following day.
+function fmtStopTime(v){
+  if(!v)return '\u2014';
+  var m=String(v).match(/^(\d{1,2}):(\d{2})/);
+  if(!m)return String(v).slice(0,5);
+  var h=parseInt(m[1],10);
+  return (h>=24?('0'+(h-24)).slice(-2)+':'+m[2]+'\u207a\u00b9':('0'+h).slice(-2)+':'+m[2]);
+}
 function loadTrainStops(d){
   var el=document.getElementById('trainStops');
   if(!el||!d.train_id)return;
@@ -1460,7 +1472,7 @@ function renderTrainStops(el,t){
     stops.map(function(s){
       var m=s.median_departure_delay;
       var sev=(m!=null)?sevInfo(m):{cls:''};
-      var due=String(s.scheduled_arrival||s.scheduled_departure||'\u2014').slice(0,5);
+      var due=fmtStopTime(s.scheduled_arrival||s.scheduled_departure);
       return '<tr><td>'+esc(s.station_display||s.station_name||'\u2014')+'</td>'+
         '<td class="num">'+esc(due)+'</td>'+
         (arr?('<td class="num">'+fmtStopDelay(s.median_arrival_delay)+'</td>'+
