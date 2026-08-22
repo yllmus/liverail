@@ -1,9 +1,3 @@
-# Crontab from the train-tracker box, captured 2026-08-22.
-#
-# The train tracker's entries: the monitor.py checks, the monthly static
-# feed refresh and the 03:30 backup_db.sh.
-#
-# Restore with: crontab deploy/crontab.txt
 # Edit this file to introduce tasks to be run by cron.
 # 
 # Each task to run has to be defined through a single line
@@ -30,3 +24,13 @@
 */15 * * * * cd /home/ubuntu && /usr/bin/python3 monitor.py >> /home/ubuntu/monitor.log 2>&1
 17 * * * * cd /home/ubuntu && /usr/bin/python3 monitor.py --deep >> /home/ubuntu/monitor.log 2>&1
 30 3 * * * /home/ubuntu/backup_db.sh >> /home/ubuntu/backup_db.log 2>&1
+
+# Monthly static-GTFS refresh. These feeds drift away from the live ones
+# silently: Germany lost 99.7% of its observations for twelve days in August
+# 2026 because gtfs.de reissued stop_ids and nothing re-imported, and Poland
+# ran 29% short for three weeks for the same reason. monitor.py detects that;
+# this prevents it. Staggered across three nights because each import is
+# hours long and they must not overlap on a two-core box.
+30 2 1 * * cd /home/ubuntu && /usr/bin/python3 refresh_static_feeds.py --country AT --write >> /home/ubuntu/refresh_feeds.log 2>&1
+30 2 2 * * cd /home/ubuntu && /usr/bin/python3 refresh_static_feeds.py --country PL --write >> /home/ubuntu/refresh_feeds.log 2>&1
+30 2 3 * * cd /home/ubuntu && /usr/bin/python3 refresh_static_feeds.py --country DE --write >> /home/ubuntu/refresh_feeds.log 2>&1
