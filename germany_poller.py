@@ -116,11 +116,13 @@ def parse_de_vehicles(feed):
                 })
             continue
 
-        delay_seconds = None
-        if stu.HasField("arrival") and stu.arrival.HasField("delay"):
-            delay_seconds = stu.arrival.delay
-        elif stu.HasField("departure") and stu.departure.HasField("delay"):
-            delay_seconds = stu.departure.delay
+        # Split as well as collapsed: a transfer needs the feeder's ARRIVAL
+        # and the connector's DEPARTURE, which differ at any stop where the
+        # train waits. delay_seconds keeps its original arrival-preferred
+        # meaning so delay_minutes and every existing caller are unchanged.
+        arrival_delay = stu.arrival.delay if (stu.HasField("arrival") and stu.arrival.HasField("delay")) else None
+        departure_delay = stu.departure.delay if (stu.HasField("departure") and stu.departure.HasField("delay")) else None
+        delay_seconds = arrival_delay if arrival_delay is not None else departure_delay
         if not gtfs_stop_id or delay_seconds is None:
             continue
         delay_minutes = round(delay_seconds / 60, 2)
@@ -130,6 +132,8 @@ def parse_de_vehicles(feed):
             "gtfs_trip_id": gtfs_trip_id,
             "gtfs_stop_id": gtfs_stop_id,
             "delay_minutes": delay_minutes,
+            "delay_arrival_minutes": None if arrival_delay is None else round(arrival_delay / 60, 2),
+            "delay_departure_minutes": None if departure_delay is None else round(departure_delay / 60, 2),
             # Needed to turn a scheduled stop_times HH:MM:SS into an actual
             # epoch for position estimation (see resolve_delays) - not used
             # for the delay figure itself, which stays feed-native.
@@ -201,7 +205,7 @@ def resolve_delays(cur, rows, parent_map=None, now_epoch=None, platform_map=None
         platform = platform_map.get(row["gtfs_stop_id"])
         cur.execute("""
             SELECT s.id, s.name, s.lat, s.lon, r.name, t.id,
-                   st.scheduled_arrival, st.scheduled_departure
+                   st.scheduled_arrival, st.scheduled_departure, st.stop_sequence
             FROM stations s
             CROSS JOIN trips t
             JOIN routes r ON r.id = t.route_id
@@ -213,7 +217,7 @@ def resolve_delays(cur, rows, parent_map=None, now_epoch=None, platform_map=None
         if not match:
             continue
         (station_id, station_name, target_lat, target_lon, route_name,
-         trip_id, target_sched_arrival, target_sched_departure) = match
+         trip_id, target_sched_arrival, target_sched_departure, stop_sequence) = match
 
         if row.get("cancellation_kind"):
             # Same reasoning as poland_poller: a train that is not calling here
@@ -225,6 +229,11 @@ def resolve_delays(cur, rows, parent_map=None, now_epoch=None, platform_map=None
                 "station_name": station_name,
                 "route_name": route_name,
                 "delay_minutes": None,
+                "stop_sequence": stop_sequence,
+                "scheduled_arrival": target_sched_arrival,
+                "scheduled_departure": target_sched_departure,
+                "delay_arrival_minutes": None,
+                "delay_departure_minutes": None,
                 "lat": None,
                 "lon": None,
                 "position_source": None,
@@ -271,6 +280,11 @@ def resolve_delays(cur, rows, parent_map=None, now_epoch=None, platform_map=None
             "station_name": station_name,
             "route_name": route_name,
             "delay_minutes": row["delay_minutes"],
+            "stop_sequence": stop_sequence,
+            "scheduled_arrival": target_sched_arrival,
+            "scheduled_departure": target_sched_departure,
+            "delay_arrival_minutes": row.get("delay_arrival_minutes"),
+            "delay_departure_minutes": row.get("delay_departure_minutes"),
             "lat": lat,
             "lon": lon,
             "position_source": position_source,
@@ -328,12 +342,15 @@ def poll():
             print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, lat, lon, position_source, trip_id, cancellation_kind, platform)
-            VALUES (%s, CURRENT_DATE, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, lat, lon, position_source, trip_id, cancellation_kind, platform,
+                 stop_sequence, scheduled_arrival, scheduled_departure, delay_arrival_minutes, delay_departure_minutes)
+            VALUES (%s, CURRENT_DATE, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             row["station_id"], row["delay_minutes"], row["is_cancelled"], row["route_name"],
             COUNTRY_CODE, row["lat"], row["lon"], row["position_source"], row["trip_id"],
             row["cancellation_kind"], row["platform"],
+            row.get("stop_sequence"), row.get("scheduled_arrival"), row.get("scheduled_departure"),
+            row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
         ))
         count += 1
     conn.commit()

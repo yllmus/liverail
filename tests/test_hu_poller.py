@@ -16,6 +16,11 @@ def test_parse_vehicles_extracts_rows_with_delay():
         "stop_name": "Kecskemet",
         "route_name": "Budapest - Szeged",
         "delay_minutes": 5.0,
+        # Different numbers on the same stop: the train arrived 5 late and
+        # left 4 late. Collapsing them, as this did before, loses exactly the
+        # figure a connection needs (see schema/008_stop_identity.sql).
+        "delay_arrival_minutes": 5.0,
+        "delay_departure_minutes": 4.0,
         "headsign": "Szeged",
         "lat": 46.9061,
         "lon": 19.6906,

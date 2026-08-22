@@ -64,6 +64,8 @@ def test_parse_pl_vehicles_extracts_raw_rows():
         "start_date": "20260801",
         "stop_sequence": 3,
         "actual_epoch": 1785551442,
+        "actual_arrival_epoch": 1785551442,
+        "actual_departure_epoch": None,
         "cancellation_kind": None,
     }
 
@@ -143,7 +145,7 @@ def test_resolve_delays_computes_delay_from_scheduled_and_actual():
     # covered separately below.
     scheduled = _scheduled_epoch("20260801", "09:59:00")
     cur = _FakeCursor([
-        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7),
+        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7, 3),
         None,
     ])
     rows = [{
@@ -170,7 +172,7 @@ def test_resolve_delays_dedupes_same_trip_id_across_start_dates():
     # the same station/route via the same static trips/stop_times row, so
     # without dedup this would double-write an indistinguishable row.
     scheduled = _scheduled_epoch("20260801", "09:59:00")
-    match = (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7)
+    match = (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7, 3)
     cur = _FakeCursor([match, None, match, None])
     rows = [
         {"gtfs_trip_id": "T1", "start_date": "20260801", "stop_sequence": 3, "actual_epoch": scheduled + 60},
@@ -185,7 +187,7 @@ def test_resolve_delays_resolves_a_cancelled_trip_to_its_origin():
     # takes the trip's first scheduled stop instead - where a rider would
     # actually have been waiting.
     cur = _FakeCursor([
-        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7),
+        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7, 3),
     ])
     rows = [{
         "gtfs_trip_id": "CANCELLED_TRIP", "start_date": "20260801",
@@ -203,10 +205,16 @@ def test_resolve_delays_resolves_a_cancelled_trip_to_its_origin():
     assert resolved[0]["position_source"] is None
     assert resolved[0]["station_id"] == 42
     assert resolved[0]["trip_id"] == 7
+    # The feed publishes no stop_sequence for a cancelled trip, but the row is
+    # still attributed to a specific stop - the origin the query just picked.
+    # Reading it back off our own stop_times is the only way to record which,
+    # and without it this row is invisible to the (trip_id, stop_sequence)
+    # index Phase 2 reads.
+    assert resolved[0]["stop_sequence"] == 3
 
 def test_resolve_delays_marks_a_skipped_stop_without_touching_the_delay():
     cur = _FakeCursor([
-        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7),
+        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7, 3),
     ])
     rows = [{
         "gtfs_trip_id": "SKIPS_A_STOP", "start_date": "20260801",
@@ -220,7 +228,7 @@ def test_resolve_delays_marks_a_skipped_stop_without_touching_the_delay():
 def test_resolve_delays_marks_normal_rows_as_not_cancelled():
     scheduled = _scheduled_epoch("20260801", "09:59:00")
     cur = _FakeCursor([
-        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7),
+        (42, "09:59:00", None, "Warszawa Centralna", 52.2297, 21.0122, "IC 1", "Kraków Główny", 7, 3),
         None,
     ])
     rows = [{
@@ -250,7 +258,7 @@ def test_resolve_delays_estimates_position_from_previous_stop():
     target_arrival = _scheduled_epoch("20260801", "12:00:00")
     now = prev_departure + (target_arrival - prev_departure) * 0.25
     cur = _FakeCursor([
-        (42, "12:00:00", None, "Kraków Główny", 50.0680, 19.9476, "IC 1", None, 7),
+        (42, "12:00:00", None, "Kraków Główny", 50.0680, 19.9476, "IC 1", None, 7, 3),
         (52.2297, 21.0122, "09:00:00", None),  # previous stop: Warszawa Centralna
     ])
     rows = [{

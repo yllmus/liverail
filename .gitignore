@@ -53,3 +53,28 @@
 !search_text.py
 !tests/test_search_text.py
 !schema/006_search_index.sql
+# Live and load-bearing since the "Find my train" pass but never allowlisted -
+# /train/AT/{id} calls this, so a fresh clone had a broken AT train page. Same
+# class as the hu_route_names.py omission documented in NOTES.md.
+!hafas/trip.js
+!schema/007_de_station_merge.sql
+!schema/008_stop_identity.sql
+!schema/009_de_station_merge_round2.sql
+
+# Disaster recovery (2026-08-22). schema.sql is the generated full structure -
+# the repo previously had no CREATE TABLE for the six core tables at all.
+# deploy/ is the machine configuration that NOTES.md had always described as
+# "not tracked in this git repo"; without it the code alone cannot be run.
+!schema/schema.sql
+!deploy/
+!deploy/crontab.txt
+!deploy/systemd/
+!deploy/systemd/*.service
+!deploy/systemd/*.timer
+!deploy/systemd/poller-instances/
+!deploy/systemd/poller-instances/*.conf
+!deploy/nginx/
+!deploy/nginx/default
+!deploy/nginx/ratelimit.conf
+!deploy/logrotate/
+!deploy/logrotate/poller

@@ -83,6 +83,8 @@ def test_parse_de_vehicles_extracts_raw_rows():
         "gtfs_trip_id": "T1",
         "gtfs_stop_id": "424107",
         "delay_minutes": 3.0,
+        "delay_arrival_minutes": 3.0,
+        "delay_departure_minutes": None,
         "start_date": None,
         "cancellation_kind": None,
     }
@@ -152,7 +154,7 @@ def test_resolve_delays_translates_child_stop_id_via_parent_map():
     # out of `stations`, so resolve_delays must translate through it. No
     # scheduled_arrival/departure here (None, None) so position estimation
     # is skipped - covered separately below.
-    cur = _FakeCursor((7, "Aachen, Hbf", 50.7678, 6.0913, "RE1", 99, None, None))
+    cur = _FakeCursor((7, "Aachen, Hbf", 50.7678, 6.0913, "RE1", 99, None, None, 4))
     parent_map = {"424107": "437028"}
     rows = [{"gtfs_trip_id": "T1", "gtfs_stop_id": "424107", "delay_minutes": 3.0, "start_date": "20260801", "cancellation_kind": None}]
     resolved = resolve_delays(cur, rows, parent_map=parent_map, platform_map={})
@@ -162,6 +164,15 @@ def test_resolve_delays_translates_child_stop_id_via_parent_map():
         "station_name": "Aachen, Hbf",
         "route_name": "RE1",
         "delay_minutes": 3.0,
+        # stop_sequence comes from our own stop_times via the join, not from
+        # the feed - see schema/008_stop_identity.sql. The split delays are
+        # None because this row was built without them; parse_de_vehicles is
+        # what fills them, covered separately above.
+        "stop_sequence": 4,
+        "scheduled_arrival": None,
+        "scheduled_departure": None,
+        "delay_arrival_minutes": None,
+        "delay_departure_minutes": None,
         "lat": None,
         "lon": None,
         "position_source": None,
@@ -180,7 +191,7 @@ def test_resolve_delays_translates_child_stop_id_via_parent_map():
 def test_resolve_delays_reads_platform_from_the_raw_child_stop_id():
     # The platform lives on the *child* row the feed points at, not the parent
     # station the delay is attributed to - so the lookup must use the raw id.
-    cur = _FakeCursor((7, "Aachen, Hbf", 50.7678, 6.0913, "RE1", 99, None, None))
+    cur = _FakeCursor((7, "Aachen, Hbf", 50.7678, 6.0913, "RE1", 99, None, None, 4))
     rows = [{"gtfs_trip_id": "T1", "gtfs_stop_id": "424107", "delay_minutes": 3.0,
              "start_date": "20260801", "cancellation_kind": None}]
     resolved = resolve_delays(cur, rows, parent_map={"424107": "437028"},
@@ -188,7 +199,7 @@ def test_resolve_delays_reads_platform_from_the_raw_child_stop_id():
     assert resolved[0]["platform"] == "5"
 
 def test_resolve_delays_marks_a_cancelled_row_without_a_delay_or_position():
-    cur = _FakeCursor((7, "Aachen, Hbf", 50.7678, 6.0913, "RE1", 99, "10:00:00", None))
+    cur = _FakeCursor((7, "Aachen, Hbf", 50.7678, 6.0913, "RE1", 99, "10:00:00", None, 4))
     rows = [{"gtfs_trip_id": "T1", "gtfs_stop_id": "424107", "delay_minutes": None,
              "start_date": "20260801", "cancellation_kind": "trip"}]
     resolved = resolve_delays(cur, rows, parent_map={"424107": "437028"}, platform_map={})
@@ -200,7 +211,7 @@ def test_resolve_delays_marks_a_cancelled_row_without_a_delay_or_position():
     assert resolved[0]["position_source"] is None
 
 def test_resolve_delays_skips_stop_id_with_no_parent_in_map():
-    cur = _FakeCursor((7, "Aachen, Hbf", 50.7678, 6.0913, "RE1", 99, None, None))
+    cur = _FakeCursor((7, "Aachen, Hbf", 50.7678, 6.0913, "RE1", 99, None, None, 4))
     rows = [{"gtfs_trip_id": "T1", "gtfs_stop_id": "unknown-stop", "delay_minutes": 3.0, "start_date": "20260801", "cancellation_kind": None}]
     assert resolve_delays(cur, rows, parent_map={}, platform_map={}) == []
 
@@ -220,7 +231,7 @@ def test_resolve_delays_estimates_position_from_previous_stop():
     prev_departure = _scheduled_epoch("20260801", "09:00:00")
     now = prev_departure + (target_actual - prev_departure) * 0.5
     cur = _FakeCursor([
-        (7, "Aachen, Hbf", 50.7678, 6.0913, "RE1", 99, "10:00:00", None),
+        (7, "Aachen, Hbf", 50.7678, 6.0913, "RE1", 99, "10:00:00", None, 4),
         (50.9429, 6.9578, "09:00:00", None),  # previous stop: Köln Hbf
     ])
     parent_map = {"424107": "437028"}

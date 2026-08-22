@@ -125,3 +125,44 @@ def resolve_ambiguous_trip(cur, country_code, matches, station_names, delay_minu
     if len(matches) > 1 and station_names:
         return disambiguate_by_schedule(cur, country_code, matches, station_names, delay_minutes, now)
     return None
+
+
+def lookup_stop_identity(cur, country_code, trip_id, station_names):
+    """Which stop of this trip is the train at, and when was it due there?
+
+    HU and AT resolve a live vehicle to a STATION BY NAME, not to a position
+    in a journey - so unlike PL and DE, whose feeds hand them a stop_sequence
+    or a stop_id directly, they can only recover the stop identity by looking
+    it up in the schedule after the trip has been resolved.
+
+    Returns (stop_sequence, scheduled_arrival, scheduled_departure), all None
+    when the trip is unresolved or the schedule has no such stop - the same
+    graceful-skip convention used everywhere else in this codebase, rather
+    than guessing a position.
+
+    `station_names` is the candidate list station_name_candidates() already
+    builds for AT's HAFAS-vs-GTFS name formatting differences; HU passes a
+    single-item list. Ordered by array_position so the closest spelling wins,
+    exactly as the INSERT that resolves station_id does - the two must agree
+    or the stop identity would describe a different station than the row it
+    is written on.
+
+    A trip that calls at the same station twice (a loop or a reversal) has two
+    candidate rows. LIMIT 1 takes the earlier, matching the convention already
+    used for AT's genuinely-duplicated station rows; there is no signal in
+    either live feed to tell the two visits apart.
+    """
+    if trip_id is None or not station_names:
+        return None, None, None
+    cur.execute("""
+        SELECT st.stop_sequence, st.scheduled_arrival, st.scheduled_departure
+        FROM stop_times st
+        JOIN stations s ON s.id = st.station_id
+        WHERE st.trip_id = %s
+          AND s.country_code = %s
+          AND s.name = ANY(%s)
+        ORDER BY array_position(%s, s.name), st.stop_sequence
+        LIMIT 1
+    """, (trip_id, country_code, station_names, station_names))
+    row = cur.fetchone()
+    return row if row else (None, None, None)

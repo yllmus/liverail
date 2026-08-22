@@ -16,6 +16,8 @@ def test_parse_at_vehicles_extracts_rows_with_delay():
         "stop_name": "Wien Meidling",
         "route_name": "RJ 61",
         "delay_minutes": 3.0,
+        "delay_arrival_minutes": 3.0,
+        "delay_departure_minutes": 3.0,
         "headsign": "Wien Hbf",
         "lat": 48.185,
         "lon": 16.375,
@@ -71,6 +73,10 @@ def test_parse_at_vehicles_falls_back_to_departure_delay():
     rows = parse_at_vehicles(load_fixture())
     praterstern = next(r for r in rows if r["stop_name"] == "Wien Praterstern")
     assert praterstern["delay_minutes"] == 1.0
+    # The fallback must not invent an arrival figure HAFAS did not publish:
+    # delay_minutes borrows the departure, the split column stays NULL.
+    assert praterstern["delay_arrival_minutes"] is None
+    assert praterstern["delay_departure_minutes"] == 1.0
 
 def test_parse_at_vehicles_skips_entries_with_no_stopovers():
     rows = parse_at_vehicles(load_fixture())

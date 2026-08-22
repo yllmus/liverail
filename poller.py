@@ -4,7 +4,7 @@ import psycopg2
 from datetime import date
 
 from hu_route_names import clean_route_name, extract_train_number
-from trip_resolution import resolve_ambiguous_trip, local_now
+from trip_resolution import lookup_stop_identity, resolve_ambiguous_trip, local_now
 from config import DB_PASSWORD
 
 DB_CONFIG = {
@@ -46,7 +46,15 @@ def parse_vehicles(data):
         stop = stop_rel.get("stop") or {}
         stop_name = stop.get("name")
         route_name = clean_route_name(trip.get("route", {}).get("longName"), trip.get("tripShortName"))
-        delay_seconds = prev.get("arrivalDelay") or prev.get("departureDelay")
+        # Split as well as collapsed. A transfer needs the feeder's ARRIVAL
+        # and the connector's DEPARTURE and they differ wherever a train
+        # waits at a stop; OTP publishes both and this was discarding one.
+        # delay_seconds keeps its exact original meaning (including the `or`,
+        # which also treats a literal 0 as absent) so delay_minutes and every
+        # existing caller are untouched.
+        arrival_delay = prev.get("arrivalDelay")
+        departure_delay = prev.get("departureDelay")
+        delay_seconds = arrival_delay or departure_delay
         # OTP's realtimeState enum includes CANCELED, and MAV's endpoint
         # accepts omitCanceled:false on its departure boards - but a
         # vehiclePositions query can only describe trains that are physically
@@ -63,6 +71,8 @@ def parse_vehicles(data):
             "stop_name": stop_name,
             "route_name": route_name,
             "delay_minutes": None if is_cancelled else round(delay_seconds / 60, 2),
+            "delay_arrival_minutes": None if (is_cancelled or arrival_delay is None) else round(arrival_delay / 60, 2),
+            "delay_departure_minutes": None if (is_cancelled or departure_delay is None) else round(departure_delay / 60, 2),
             "is_cancelled": is_cancelled,
             "cancellation_kind": "stop" if is_cancelled else None,
             # Best-filled platform data of the four countries (33/43 vehicles
@@ -159,16 +169,29 @@ def poll():
         trip_id = resolve_trip_id(cur, row["train_number"], row["stop_name"], row["delay_minutes"], local_now(COUNTRY_CODE))
         if trip_id is not None:
             resolved_count += 1
+        # Which stop of the journey this is, and when it was due. Only
+        # knowable once trip_id resolved - MAV's live feed identifies the stop
+        # by name, not by position. (OTP does publish prevOrCurrentStop.
+        # stopPosition, but that is an OTP pattern index and HU's static
+        # stop_sequence values are sparse - up to 99,990, and only 56 of 2,000
+        # sampled trips number consecutively - so the two are different
+        # numbering schemes and must not be conflated. See
+        # schema/008_stop_identity.sql.)
+        stop_sequence, sched_arrival, sched_departure = lookup_stop_identity(
+            cur, COUNTRY_CODE, trip_id, [row["stop_name"]])
         cur.execute("""
             INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id, trip_id, cancellation_kind, platform)
-            SELECT s.id, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id, trip_id, cancellation_kind, platform,
+                 stop_sequence, scheduled_arrival, scheduled_departure, delay_arrival_minutes, delay_departure_minutes)
+            SELECT s.id, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             FROM stations s
             WHERE s.name = %s AND s.country_code = %s
         """, (
             date.today(), row["delay_minutes"], row["is_cancelled"], row["route_name"], COUNTRY_CODE,
             row["headsign"], row["lat"], row["lon"], position_source, row["live_trip_id"], trip_id,
             row["cancellation_kind"], row["platform"],
+            stop_sequence, sched_arrival, sched_departure,
+            row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
             row["stop_name"], COUNTRY_CODE,
         ))
         count += 1

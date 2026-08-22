@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from trip_resolution import resolve_ambiguous_trip
+from trip_resolution import lookup_stop_identity, resolve_ambiguous_trip
 
 
 class _FakeCursor:
@@ -59,3 +59,55 @@ def test_resolve_ambiguous_trip_no_station_returns_none_when_still_tied():
 
 def test_resolve_ambiguous_trip_returns_none_for_no_candidates():
     assert resolve_ambiguous_trip(_FakeCursor([]), "HU", [], None, None) is None
+
+
+class _FetchOneCursor:
+    """lookup_stop_identity issues a single query and reads one row."""
+    def __init__(self, row):
+        self._row = row
+        self.executed = False
+        self.last_query_args = None
+
+    def execute(self, query, args):
+        self.executed = True
+        self.last_query_args = args
+
+    def fetchone(self):
+        return self._row
+
+
+def test_lookup_stop_identity_returns_the_scheduled_stop():
+    cur = _FetchOneCursor((7, "09:59:00", "10:01:00"))
+    assert lookup_stop_identity(cur, "AT", 101, ["Wien Hbf"]) == (7, "09:59:00", "10:01:00")
+
+
+def test_lookup_stop_identity_skips_the_query_for_an_unresolved_trip():
+    # HU resolves ~60% of trips and AT ~41%; the rest must not cost a query
+    # each, and must not resolve to some other train's stop.
+    cur = _FetchOneCursor((7, "09:59:00", None))
+    assert lookup_stop_identity(cur, "HU", None, ["Tapolca"]) == (None, None, None)
+    assert cur.executed is False
+
+
+def test_lookup_stop_identity_skips_the_query_with_no_station_candidates():
+    cur = _FetchOneCursor((7, "09:59:00", None))
+    assert lookup_stop_identity(cur, "AT", 101, []) == (None, None, None)
+    assert cur.executed is False
+
+
+def test_lookup_stop_identity_returns_nulls_when_the_schedule_has_no_such_stop():
+    # A resolved trip whose static schedule does not list this station - the
+    # same graceful skip used everywhere else, not a guessed position.
+    cur = _FetchOneCursor(None)
+    assert lookup_stop_identity(cur, "AT", 101, ["Wien Hbf"]) == (None, None, None)
+
+
+def test_lookup_stop_identity_passes_candidates_in_preference_order():
+    # AT's HAFAS and GTFS names disagree on formatting, so the candidate list
+    # is ordered - and it must be the SAME list the INSERT resolves
+    # station_id with, or the stop identity would describe a different
+    # station than the row it is written on.
+    cur = _FetchOneCursor((7, "09:59:00", None))
+    candidates = ["Wien Hbf", "Wien Hauptbahnhof"]
+    lookup_stop_identity(cur, "AT", 101, candidates)
+    assert cur.last_query_args == (101, "AT", candidates, candidates)
