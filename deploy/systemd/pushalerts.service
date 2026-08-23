@@ -1,0 +1,14 @@
+[Unit]
+Description=Send Web Push delay alerts for watched trains
+After=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+# User=ubuntu is load-bearing, not boilerplate. pywebpush lives in this user's
+# ~/.local site-packages, which root cannot see - the exact failure that broke
+# Poland's first poller run (ModuleNotFoundError on gtfs-realtime-bindings).
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+ExecStart=/usr/bin/python3 /home/ubuntu/push_alerts.py
+StandardOutput=append:/home/ubuntu/push_alerts.log
+StandardError=append:/home/ubuntu/push_alerts.log

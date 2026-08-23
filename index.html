@@ -324,7 +324,16 @@ footer.pagefoot .gapnote{font-size:13px;color:var(--text-dim);max-width:70ch;mar
 .fav-btn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2}
 .fav-btn.on{color:var(--accent);border-color:var(--accent)}
 .fav-btn.on svg{fill:currentColor}
-.track-fav{margin-top:14px}
+.track-fav{margin-top:14px;display:flex;gap:8px;flex-wrap:wrap}
+.alert-btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);
+  background:var(--surface);color:var(--text-dim);border-radius:8px;padding:7px 12px;
+  cursor:pointer;font:600 13px var(--font-body)}
+.alert-btn:hover{border-color:var(--accent);color:var(--text)}
+.alert-btn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2}
+.alert-btn.on{color:var(--accent);border-color:var(--accent)}
+.alert-btn.on svg{fill:currentColor}
+.alert-btn[disabled]{opacity:.55;cursor:default}
+.alert-note{margin-top:8px;font:13px/1.5 var(--font-body);color:var(--text-dim)}
 .simple-card{border:2px solid var(--line);border-radius:16px;padding:32px;text-align:center;background:var(--surface)}
 .simple-card.sev-ontime{border-color:var(--sev-ontime);background:var(--sev-ontime-bg)}
 .simple-card.sev-late{border-color:var(--sev-late);background:var(--sev-late-bg)}
@@ -703,6 +712,22 @@ function api(path,params){
     if(timer)clearTimeout(timer);
     throw e;
   });
+}
+// POST counterpart of api(). Every /push/* route is a POST, including the one
+// that only reads: a push endpoint is a capability URL and putting it in a
+// query string would write it into nginx's access log. Shorter timeout than
+// api() - these are small writes against local tables, not a feed resolve.
+function apiPost(path,body){
+  var ctrl=('AbortController' in window)?new AbortController():null;
+  var timer=ctrl?setTimeout(function(){ctrl.abort();},15000):null;
+  var opts={method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(body||{})};
+  if(ctrl)opts.signal=ctrl.signal;
+  return fetch(API+path,opts).then(function(r){
+    if(timer)clearTimeout(timer);
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  }).catch(function(e){ if(timer)clearTimeout(timer); throw e; });
 }
 function debounce(fn,ms){var t;return function(){var a=arguments,ctx=this;clearTimeout(t);t=setTimeout(function(){fn.apply(ctx,a);},ms);};}
 
@@ -1361,6 +1386,141 @@ document.addEventListener('click',function(e){
   var lbl=btn.querySelector('span');if(lbl)lbl.textContent=on?'Saved':'Save';
   renderFavs();
 });
+/* ---------- delay alerts (Web Push) ----------
+   A notification when a watched train goes late, gets later, or is cancelled.
+   No account: the browser's push subscription IS the identity (see
+   schema/017_push_alerts.sql).
+
+   THIS NEEDS HTTPS AND SAYS SO. Service workers and PushManager only exist in
+   a secure context, and this site is currently served over plain http on a
+   bare IP with no domain. Rather than render a button that silently does
+   nothing, isSecureContext is checked up front and the UI explains why the
+   feature is unavailable. Everything server-side is already live, so this
+   starts working the moment a certificate exists - no code change.
+
+   WHY THIS STORES train_id WHEN FAVOURITES DELIBERATELY DO NOT. A favourite is
+   permanent and re-found by train number each time, because ids are reused
+   between service days. An alert watch is the opposite: it is for ONE journey,
+   it needs the exact live id to follow that specific run, and it expires in 24
+   hours precisely because the id stops meaning this train after that. */
+var PUSH_KEY_CACHE=null, PUSH_SUB=null, PUSH_WATCHED={};
+var BELL_SVG='<svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>';
+
+function pushSupported(){
+  return !!(window.isSecureContext && 'serviceWorker' in navigator &&
+            'PushManager' in window && 'Notification' in window);
+}
+function pushUnavailableReason(){
+  if(!window.isSecureContext)return 'Alerts need a secure (https) connection — not available on this address yet.';
+  if(!('serviceWorker' in navigator)||!('PushManager' in window))return 'This browser doesn’t support push notifications.';
+  if(Notification.permission==='denied')return 'Notifications are blocked for this site in your browser settings.';
+  return '';
+}
+function b64ToUint8(s){
+  var pad='='.repeat((4-s.length%4)%4);
+  var raw=atob((s+pad).replace(/-/g,'+').replace(/_/g,'/'));
+  var out=new Uint8Array(raw.length);
+  for(var i=0;i<raw.length;i++)out[i]=raw.charCodeAt(i);
+  return out;
+}
+function pushKey(){
+  if(PUSH_KEY_CACHE)return Promise.resolve(PUSH_KEY_CACHE);
+  return api('/push/key').then(function(k){PUSH_KEY_CACHE=k;return k;});
+}
+/* Returns the existing subscription, or null. Never prompts - prompting on
+   page load is the fastest way to get permanently blocked. */
+function pushExisting(){
+  if(!pushSupported())return Promise.resolve(null);
+  return navigator.serviceWorker.register('/sw.js')
+    .then(function(reg){return reg.pushManager.getSubscription();})
+    .catch(function(){return null;});
+}
+function pushSubscribe(){
+  return pushKey().then(function(k){
+    if(!k.enabled)throw new Error('Push not configured on the server');
+    return navigator.serviceWorker.register('/sw.js').then(function(reg){
+      return reg.pushManager.getSubscription().then(function(sub){
+        if(sub)return sub;
+        return reg.pushManager.subscribe({userVisibleOnly:true,
+          applicationServerKey:b64ToUint8(k.public_key)});
+      });
+    });
+  });
+}
+function subPayload(sub){
+  var j=sub.toJSON();
+  return {endpoint:j.endpoint,keys:{p256dh:j.keys.p256dh,auth:j.keys.auth}};
+}
+function alertKey(country,id){return country+'|'+id;}
+function alertBtnHtml(d,title){
+  if(!d.train_id)return '';
+  var on=!!PUSH_WATCHED[alertKey(state.country,d.train_id)];
+  var reason=pushUnavailableReason();
+  var attrs=' data-alert="'+encodeURIComponent(JSON.stringify(
+      {country:state.country,train_id:d.train_id,label:title,station:d.current_stop||null}))+'"';
+  if(reason)attrs+=' disabled title="'+esc(reason)+'"';
+  return '<button class="alert-btn'+(on?' on':'')+'"'+attrs+' aria-pressed="'+(on?'true':'false')+'">'+
+         BELL_SVG+'<span>'+(on?'Alerts on':'Alert me')+'</span></button>';
+}
+function alertNoteHtml(){
+  var reason=pushUnavailableReason();
+  return reason?'<div class="alert-note">'+esc(reason)+'</div>':'';
+}
+document.addEventListener('click',function(e){
+  var btn=e.target&&e.target.closest?e.target.closest('.alert-btn'):null;
+  if(!btn||btn.disabled)return;
+  e.preventDefault();
+  var item;
+  try{item=JSON.parse(decodeURIComponent(btn.getAttribute('data-alert')));}catch(err){return;}
+  var k=alertKey(item.country,item.train_id), on=!!PUSH_WATCHED[k];
+  var lbl=btn.querySelector('span');
+  function paint(state_on){
+    PUSH_WATCHED[k]=state_on||undefined;
+    btn.classList.toggle('on',!!state_on);
+    btn.setAttribute('aria-pressed',state_on?'true':'false');
+    if(lbl)lbl.textContent=state_on?'Alerts on':'Alert me';
+    btn.disabled=false;
+  }
+  btn.disabled=true; if(lbl)lbl.textContent='…';
+  if(on){
+    pushExisting().then(function(sub){
+      if(!sub){paint(false);return;}
+      return apiPost('/push/unwatch',{endpoint:sub.endpoint,country:item.country,
+        train_id:item.train_id}).then(function(){paint(false);});
+    }).catch(function(){paint(true);});
+    return;
+  }
+  // Permission is requested HERE, on a real click, not on page load.
+  Notification.requestPermission().then(function(perm){
+    if(perm!=='granted'){paint(false);
+      var note=document.querySelector('.alert-note');
+      if(!note){note=document.createElement('div');note.className='alert-note';
+        btn.parentNode.parentNode.appendChild(note);}
+      note.textContent='Notifications weren’t allowed, so alerts stay off.';
+      return;
+    }
+    return pushSubscribe().then(function(sub){
+      PUSH_SUB=sub;
+      var body=subPayload(sub);
+      body.country=item.country; body.train_id=item.train_id;
+      body.label=item.label; body.station=null;   // whole journey, not one stop
+      return apiPost('/push/watch',body).then(function(){paint(true);});
+    });
+  }).catch(function(){paint(false);});
+});
+/* On load, ask the server what this browser already watches, so the bell shows
+   the true state rather than resetting to "off" on every refresh. */
+function pushSyncWatches(){
+  if(!pushSupported())return;
+  pushExisting().then(function(sub){
+    if(!sub)return;
+    PUSH_SUB=sub;
+    return apiPost('/push/watches',{endpoint:sub.endpoint}).then(function(r){
+      PUSH_WATCHED={};
+      (r.watches||[]).forEach(function(w){PUSH_WATCHED[alertKey(w.country,w.train_id)]=true;});
+    });
+  }).catch(function(){});
+}
 function renderFavs(){
   var el=document.getElementById('simpleFavs');
   if(!el)return;
@@ -1567,7 +1727,9 @@ function renderTrain(d){
       (d.current_stop?'<div class="track-now">Now at <b>'+esc(d.current_stop)+'</b>'+platformTag(d.platform)+'</div>':'')+
       '<div class="track-plain">'+simplePlainMessage(d.delay_minutes,d)+'</div>'+
       '<div class="track-fav">'+favBtnHtml({type:'train',country:state.country,
-        q:d.train_number||d.route_name||'',label:title,sub:d.headsign||d.destination||''})+'</div>'+
+        q:d.train_number||d.route_name||'',label:title,sub:d.headsign||d.destination||''})+
+        alertBtnHtml(d,title)+'</div>'+
+      alertNoteHtml()+
     '</div>'+
     (mappable.length?'<div class="track-map" id="trackMap"></div>':'')+
     renderJourney(d)+
@@ -2134,6 +2296,7 @@ function startRefresh(){
 document.getElementById('brandTag').textContent=(META['HU'].label+' · '+META['HU'].short);
 renderCountryTabs();
 renderFavs();
+pushSyncWatches();
 initMap();
 loadCountriesMeta();
 loadAll();

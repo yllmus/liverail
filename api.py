@@ -3986,3 +3986,143 @@ def outbound_click(link_id: int, request: Request):
     conn.commit()
     cur.close(); conn.close()
     return RedirectResponse(row[0], status_code=302)
+
+
+# ---------------------------------------------------------------------------
+# Delay alerts (Web Push)
+#
+# No login. A browser's push subscription IS its identity, which is why this
+# works at all on a site with an empty `users` table - see schema/017.
+#
+# EVERY ONE OF THESE IS A POST, INCLUDING THE ONE THAT ONLY READS. A push
+# endpoint is a capability URL: anyone holding it can send that browser
+# notifications. Putting it in a query string would write it into nginx's
+# access log and every intermediary's, so it travels in a body instead.
+# ---------------------------------------------------------------------------
+from pydantic import BaseModel
+from typing import Optional
+import config as _cfg
+import push_alerts as _push
+
+
+class _PushKeys(BaseModel):
+    p256dh: str
+    auth: str
+
+
+class _WatchBody(BaseModel):
+    endpoint: str
+    keys: _PushKeys
+    country: str
+    train_id: str
+    label: Optional[str] = None
+    station: Optional[str] = None
+    hours: Optional[int] = 24
+
+
+class _EndpointBody(BaseModel):
+    endpoint: str
+    country: Optional[str] = None
+    train_id: Optional[str] = None
+
+
+@app.get("/push/key")
+def push_key():
+    """The VAPID public key the browser needs to subscribe. Public by design.
+    `enabled: false` lets the frontend hide the whole feature rather than
+    offering a button that cannot work."""
+    return {"enabled": _cfg.PUSH_ENABLED, "public_key": _cfg.VAPID_PUBLIC_KEY}
+
+
+def _upsert_subscription(cur, body):
+    cur.execute("""
+        INSERT INTO push_subscription (endpoint, p256dh, auth)
+        VALUES (%s,%s,%s)
+        ON CONFLICT (endpoint) DO UPDATE
+          SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth,
+              disabled_at = NULL, failures = 0
+        RETURNING id
+    """, (body.endpoint, body.keys.p256dh, body.keys.auth))
+    return cur.fetchone()[0]
+
+
+@app.post("/push/watch")
+def push_watch(body: _WatchBody):
+    """Start alerting this browser about one train."""
+    if not _cfg.PUSH_ENABLED:
+        raise HTTPException(status_code=503, detail="Push alerts are not configured")
+    if body.country not in ("HU", "AT", "PL", "DE"):
+        raise HTTPException(status_code=400, detail="Unknown country")
+    # Clamped rather than trusted. A watch outliving its journey would alert
+    # about a different train wearing a recycled id - see schema/017.
+    hours = max(1, min(int(body.hours or 24), 48))
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        sub_id = _upsert_subscription(cur, body)
+        cur.execute("""
+            INSERT INTO push_watch (subscription_id, country_code, train_id,
+                                    label, station, expires_at)
+            VALUES (%s,%s,%s,%s,%s, now() + make_interval(hours => %s))
+            ON CONFLICT (subscription_id, country_code, train_id) DO UPDATE
+              SET label = EXCLUDED.label, station = EXCLUDED.station,
+                  expires_at = EXCLUDED.expires_at
+            RETURNING id, expires_at
+        """, (sub_id, body.country, body.train_id, body.label, body.station, hours))
+        wid, expires = cur.fetchone()
+        conn.commit()
+        return {"watching": True, "watch_id": wid, "expires_at": expires.isoformat(),
+                "note": "Alerts stop when this expires. Train ids are reissued "
+                        "between service days, so a watch is for one journey."}
+    finally:
+        cur.close(); conn.close()
+
+
+@app.post("/push/unwatch")
+def push_unwatch(body: _EndpointBody):
+    """Stop alerting about one train, or - with no train_id - about everything."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        if body.train_id and body.country:
+            cur.execute("""DELETE FROM push_watch w USING push_subscription s
+                           WHERE w.subscription_id = s.id AND s.endpoint = %s
+                             AND w.country_code = %s AND w.train_id = %s""",
+                        (body.endpoint, body.country, body.train_id))
+        else:
+            cur.execute("""DELETE FROM push_watch w USING push_subscription s
+                           WHERE w.subscription_id = s.id AND s.endpoint = %s""",
+                        (body.endpoint,))
+        n = cur.rowcount
+        conn.commit()
+        return {"removed": n}
+    finally:
+        cur.close(); conn.close()
+
+
+@app.post("/push/watches")
+def push_watches(body: _EndpointBody):
+    """What this browser is currently watching, with each train's last known
+    state so the UI can show it without a second round of calls."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT w.id, w.country_code, w.train_id, w.label, w.station, w.expires_at
+            FROM push_watch w JOIN push_subscription s ON s.id = w.subscription_id
+            WHERE s.endpoint = %s AND w.expires_at > now()
+            ORDER BY w.created_at DESC
+        """, (body.endpoint,))
+        out = []
+        for wid, cc, tid, label, station, expires in cur.fetchall():
+            state = _push.latest_state(cur, cc, tid, station)
+            out.append({"watch_id": wid, "country": cc, "train_id": tid,
+                        "label": label, "station": station,
+                        "expires_at": expires.isoformat(),
+                        "delay_minutes": state.get("delay"),
+                        "is_cancelled": state.get("cancelled", False),
+                        "current_stop": state.get("stop"),
+                        "found": state.get("found", False)})
+        return {"watches": out}
+    finally:
+        cur.close(); conn.close()

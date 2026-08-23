@@ -1,0 +1,12 @@
+[Unit]
+Description=Check watched trains for delay alerts every 5 minutes
+
+[Timer]
+# :04 of every five-minute block - after all four pollers (hu :00, at :01,
+# pl :02, de :03) have written the state this reads. Absolute wall-clock for
+# the same reason they are: OnUnitActiveSec re-syncs and never un-syncs.
+OnCalendar=*:4/5:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

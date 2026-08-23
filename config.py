@@ -34,3 +34,12 @@ if not DB_PASSWORD:
         "environment. See .env.example; on a fresh restore, copy it to .env "
         "and set a real password matching the trainuser role in Postgres."
     )
+
+# Web Push (VAPID). Optional, unlike the DB password: alerts are a feature, and
+# a box without keys should serve the rest of the site normally rather than
+# refuse to start. push_alerts and /push/* check PUSH_ENABLED and report the
+# feature as unavailable instead of raising.
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
+VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "mailto:admin@example.com")
+PUSH_ENABLED = bool(VAPID_PRIVATE_KEY and VAPID_PUBLIC_KEY)

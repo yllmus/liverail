@@ -2,8 +2,14 @@
 Description=Run DE (DB) poller every 5 minutes
 
 [Timer]
-OnActiveSec=390
-OnUnitActiveSec=5min
+# Absolute wall-clock slot, NOT OnUnitActiveSec. The interval form counts from
+# each unit's own last trigger, so any manual run re-syncs two timers and they
+# then stay locked together forever - all four had collided on the same second
+# twice, and re-staggering by hand fixed it only until the next manual poll.
+# A fixed minute offset per country cannot drift: hu=:00, at=:01, pl=:02,
+# de=:03, every five minutes. Four pollers on this box's single vCPU at the
+# same instant degrade the API they share it with.
+OnCalendar=*:3/5:00
 Persistent=true
 
 [Install]

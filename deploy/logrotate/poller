@@ -3,6 +3,7 @@
 /home/ubuntu/pl_poller.log
 /home/ubuntu/de_poller.log
 /home/ubuntu/refresh_feeds.log
+/home/ubuntu/push_alerts.log
 {
     daily
     rotate 7

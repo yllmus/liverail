@@ -97,3 +97,10 @@
 !deploy/nginx/ratelimit.conf
 !deploy/logrotate/
 !deploy/logrotate/poller
+# Delay alerts (Web Push), 2026-08-23. Added in the same commit as the files
+# themselves - a denied file is invisible to `git status`, not listed as
+# untracked, which is how three earlier load-bearing files stayed unbacked-up.
+!push_alerts.py
+!sw.js
+!schema/017_push_alerts.sql
+!tests/test_push_alerts.py

@@ -31,9 +31,10 @@ smaller set is both cheaper and keeps the busier station page continuous -
 and then adopts the gtfs_stop_id the CURRENT feed publishes, because that is
 the id the poller will look up tomorrow.
 
-SAFETY. Nothing is deleted until its children are moved. A group with three or
-more rows aborts the merge rather than half-merging it, which is the guard
-schema/009 also carries. Dry run by default.
+SAFETY. Nothing is deleted until its children are moved, and the set of tables
+holding children is read from pg_constraint rather than hardcoded, so a table
+added later stops the merge with a message instead of breaking it mid-run. Dry
+run by default.
 
     python3 refresh_static_feeds.py --country PL            # report only
     python3 refresh_static_feeds.py --country PL --write
@@ -51,6 +52,27 @@ import psycopg2
 from config import DB_PASSWORD
 
 WORK = os.path.expanduser("~/gtfs_refresh")
+# A tripwire for real corruption, not for ordinary feed churn - see
+# merge_stations. Three rounds of re-imports produced exactly one triple.
+MAX_GROUP_SIZE = 6
+
+# Tables holding a station_id that a merge must REPOINT at the surviving row,
+# and tables whose station_id rows are DERIVED and should simply be dropped.
+#
+# These are not the whole list, and deliberately so: merge_stations asks
+# Postgres which tables actually reference stations and refuses to run if it
+# meets one that is in neither set. The first version hardcoded two tables and
+# broke the moment schema/012 added delay_distribution ten days later - a
+# foreign key violation mid-merge, after the first few groups had already been
+# rewritten. Discovering the dependents means the next table added gets a clear
+# refusal instead of a partial merge.
+REPOINT_TABLES = {"stop_times", "delay_observations"}
+# delay_distribution is recomputed wholesale per country by
+# api.refresh_delay_distribution, and the warmer rebuilds it once it is a day
+# stale. Repointing it would merge two stations' percentiles by concatenation,
+# which is not how a percentile works; dropping the country's rows lets them be
+# recomputed from the merged history instead.
+DERIVED_TABLES = {"delay_distribution"}
 
 # Each entry: the zip to fetch, the directory to import from, and the extra
 # import.py flags that country needs. The prefixes matter enormously for
@@ -118,42 +140,72 @@ def merge_stations(country, write=False):
     conn = connect()
     cur = conn.cursor()
     try:
+        # N-way, not pairs. The first version of this refused any group with
+        # three or more rows, on the theory that a triple meant something had
+        # gone wrong. Run against real data after three rounds of re-imports it
+        # found 7,578 clean pairs and exactly ONE triple - "Weida Mitte", with
+        # three observations between its rows - and refused all 7,578 because
+        # of it. Merging N rows is the same operation iterated, so it does that
+        # instead, and keeps a ceiling only as a tripwire for genuine
+        # corruption rather than for ordinary feed churn.
+        cur.execute("""
+            SELECT DISTINCT c.conrelid::regclass::text
+            FROM pg_constraint c
+            WHERE c.contype='f' AND c.confrelid='stations'::regclass
+        """)
+        dependents = {r[0] for r in cur.fetchall()}
+        unknown = dependents - REPOINT_TABLES - DERIVED_TABLES
+        if unknown:
+            print(f"  ABORT: {', '.join(sorted(unknown))} reference(s) stations and this "
+                  f"script does not know whether to repoint or drop them.\n"
+                  f"  Add each to REPOINT_TABLES or DERIVED_TABLES, then re-run.")
+            return 0
+        repoint = sorted(dependents & REPOINT_TABLES)
+        derived = sorted(dependents & DERIVED_TABLES)
+
         cur.execute("""
             SELECT count(*) FROM (
               SELECT 1 FROM stations WHERE country_code=%s
-              GROUP BY name, lat, lon HAVING count(*) > 2) x
-        """, (country,))
-        if cur.fetchone()[0]:
-            print(f"  ABORT: groups with 3+ rows exist - merge by hand, do not half-merge")
+              GROUP BY name, lat, lon HAVING count(*) > %s) x
+        """, (country, MAX_GROUP_SIZE))
+        oversized = cur.fetchone()[0]
+        if oversized:
+            print(f"  ABORT: {oversized} group(s) with more than {MAX_GROUP_SIZE} rows - "
+                  f"that is not feed churn, look before merging")
             return 0
         cur.execute("""
             SELECT array_agg(id ORDER BY id) FROM stations
             WHERE country_code=%s AND lat IS NOT NULL
-            GROUP BY name, lat, lon HAVING count(*) = 2
+            GROUP BY name, lat, lon HAVING count(*) > 1
         """, (country,))
         groups = [r[0] for r in cur.fetchall()]
         if not groups:
             print("  no duplicate stations")
             return 0
         print(f"  {len(groups)} duplicate station groups")
+        print(f"  repoint: {', '.join(repoint) or 'none'}   drop derived: {', '.join(derived) or 'none'}")
         moved = 0
-        for a, b in groups:
-            # Keep whichever row carries more history: moving the smaller set
-            # is cheaper and keeps the busier station page continuous.
+        for ids in groups:
+            # Keep whichever row carries the most history: moving the smaller
+            # sets is cheaper and keeps the busiest station page continuous.
             cur.execute("""SELECT station_id, count(*) FROM delay_observations
-                           WHERE station_id = ANY(%s) GROUP BY 1""", ([a, b],))
+                           WHERE station_id = ANY(%s) GROUP BY 1""", (ids,))
             counts = dict(cur.fetchall())
-            keep, drop = (a, b) if counts.get(a, 0) >= counts.get(b, 0) else (b, a)
-            # Adopt the id the CURRENT feed publishes - the higher row id is
-            # the one this import just wrote, so it is the live one.
-            cur.execute("SELECT gtfs_stop_id FROM stations WHERE id=%s", (max(a, b),))
+            keep = max(ids, key=lambda i: (counts.get(i, 0), i))
+            drops = [i for i in ids if i != keep]
+            # Adopt the id the CURRENT feed publishes. The highest row id is
+            # the one the most recent import wrote, so it is the live one.
+            cur.execute("SELECT gtfs_stop_id FROM stations WHERE id=%s", (max(ids),))
             live_gtfs_id = cur.fetchone()[0]
             if not write:
                 moved += 1
                 continue
-            cur.execute("UPDATE stop_times SET station_id=%s WHERE station_id=%s", (keep, drop))
-            cur.execute("UPDATE delay_observations SET station_id=%s WHERE station_id=%s", (keep, drop))
-            cur.execute("DELETE FROM stations WHERE id=%s", (drop,))
+            for tbl in repoint:
+                cur.execute(f"UPDATE {tbl} SET station_id=%s WHERE station_id = ANY(%s)",
+                            (keep, drops))
+            for tbl in derived:
+                cur.execute(f"DELETE FROM {tbl} WHERE station_id = ANY(%s)", (drops,))
+            cur.execute("DELETE FROM stations WHERE id = ANY(%s)", (drops,))
             cur.execute("UPDATE stations SET gtfs_stop_id=%s WHERE id=%s", (live_gtfs_id, keep))
             moved += 1
         if write:
