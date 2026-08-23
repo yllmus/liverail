@@ -15,3 +15,15 @@ for C in DE PL HU AT; do
     timeout 3600 python3 -u model_loop.py --country "$C" 2>&1
     echo
 done
+
+# The delay forecast re-measures itself rather than being promoted. It is not
+# wired into any endpoint: on the three days of trajectory data that existed
+# when it was written it beat persistence by only ~2.5% (DE) and ~1.6% (HU),
+# and only beyond three and six stops respectively. Those margins are too thin
+# to ship, but they should GROW as history deepens - so this runs weekly and
+# writes the numbers to the same log, and the decision to ship becomes a
+# reading rather than a guess. See DELAY_STRUCTURE.md section 6.
+for C in DE HU; do
+    timeout 3600 python3 -u delay_forecast.py --country "$C" 2>&1
+    echo
+done
