@@ -1,0 +1,13 @@
+[Unit]
+Description=Retrain and re-judge the transfer-risk model
+After=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+# lightgbm and numpy live in this user's ~/.local, invisible to root.
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+Nice=10
+ExecStart=/home/ubuntu/retrain.sh
+StandardOutput=append:/home/ubuntu/retrain.log
+StandardError=append:/home/ubuntu/retrain.log

@@ -104,3 +104,8 @@
 !sw.js
 !schema/017_push_alerts.sql
 !tests/test_push_alerts.py
+# Transfer-model serving + the weekly retrain, 2026-08-23.
+!transfer_model.py
+!tests/test_transfer_model.py
+!tests/test_model_gate.py
+!retrain.sh

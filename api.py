@@ -35,6 +35,7 @@ from germany_poller import (
 from station_names import clean_display_name
 from hu_route_names import clean_route_name, extract_train_number
 from config import DB_PASSWORD
+import transfer_model
 
 app = FastAPI()
 
@@ -421,7 +422,8 @@ def _normalise_plan(raw, country, cur):
                 # carries its own refusal when no rung is deep enough, so a
                 # consumer can never mistake "not computed" for "no risk".
                 "risk": assess_transfer(cur, country, a["to"], buffer_min,
-                                        a["route_name"], b["route_name"]),
+                                        a["route_name"], b["route_name"],
+                                        when=_transfer_time(a.get("arrive"), country)),
             })
         start = _epoch_ms_to_local(it.get("startTime"), country)
         end = _epoch_ms_to_local(it.get("endTime"), country)
@@ -692,9 +694,25 @@ def resolve_station_anywhere(cur, name):
         return exact if (exact[4] or 0) >= (fuzzy[4] or 0) else fuzzy
     return exact or fuzzy
 
+def _transfer_time(iso_str, country):
+    """The moment a transfer happens, for the model's hour/weekday features.
+
+    Falls back to now in the station's own timezone. This box runs UTC and
+    GTFS times are local wall-clock, a mismatch that has already produced one
+    real bug in this project (trip_resolution.local_now exists because of it),
+    so the fallback goes through the same helper rather than datetime.now().
+    """
+    if iso_str:
+        try:
+            return datetime.fromisoformat(iso_str)
+        except (TypeError, ValueError):
+            pass
+    return local_now(country)
+
+
 def assess_transfer(cur, country, station_name, buffer_min,
                     feeder_route=None, connector_route=None, min_sample=None,
-                    resolved=None):
+                    resolved=None, when=None):
     """Risk for one transfer, or an explicit refusal with the reason."""
     # AT's HAFAS names and its own GTFS names disagree on formatting for a
     # real chunk of stations - "Wörgl Hbf" vs "Wörgl Hauptbahnhof", trailing
@@ -735,11 +753,29 @@ def assess_transfer(cur, country, station_name, buffer_min,
                 "reason": ("No delay distribution deep enough for the arriving train at this "
                            "station yet. Stop-level history began on 21 August 2026.")}
 
-    # Mixture first, quantile curve as the fallback. The fallback is not
-    # vestigial: a station too thin to fit a mixture on still has percentiles,
-    # and a bad fit on twenty observations would be worse than either.
-    p = _transfer_probability_mixture(feeder, connector, buffer_min, mct)
-    basis_model = "mixture"
+    # Three rungs, best first, each falling through to the next rather than
+    # guessing: the promoted model, the fitted mixture, the raw quantile curve.
+    #
+    # The champion goes first because it is the only one of the three that has
+    # been MEASURED against the others on held-out days - DE's beats the
+    # mixture 0.1434 to 0.1540 on tight transfers, and is three times better
+    # calibrated (0.0075 vs 0.0231). It answers only for a country that has a
+    # promoted model and only for stations it actually trained on; everywhere
+    # else it returns None and costs nothing. See transfer_model.py.
+    p, basis_model = None, None
+    if buffer_min is not None:
+        # Hour and weekday are features, so the model needs the time the
+        # transfer happens. Callers inside /plan have it exactly; a bare
+        # /transfer/risk call does not, and "now" in the station's own timezone
+        # is the honest stand-in rather than a silent zero.
+        at = when or local_now(country)
+        p = transfer_model.predict(country, station_id, feeder_route,
+                                   connector_route, buffer_min, at)
+        if p is not None:
+            basis_model = "lgbm"
+    if p is None:
+        p = _transfer_probability_mixture(feeder, connector, buffer_min, mct)
+        basis_model = "mixture"
     if p is None:
         p = _transfer_probability(feeder, connector, buffer_min, mct)
         basis_model = "quantiles"
@@ -783,6 +819,8 @@ def assess_transfer(cur, country, station_name, buffer_min,
         # report better than 0.95; the mixture models the tail and has no such
         # ceiling.
         "model": basis_model,
+        # Only the raw quantile curve stops at p95. The mixture models the
+        # tail, and the champion learned it from outcomes.
         "tail_unmodelled_above_pct": 95 if basis_model == "quantiles" else None,
         # Provenance on both sides: which ladder rung answered and how deep it
         # was. A risk figure without these is not checkable.
@@ -1132,7 +1170,8 @@ def _normalise_plan_at(raw, country, cur):
                 "connector_route": b["route_name"], "connector_number": b["train_number"],
                 "_arrive_hm": a.get("arrive_hm"), "_depart_hm": b.get("depart_hm"),
                 "risk": assess_transfer(cur, country, a["to"], buffer_min,
-                                        a["route_name"], b["route_name"]),
+                                        a["route_name"], b["route_name"],
+                                        when=_transfer_time(a.get("arrive"), country)),
             })
         start = _parse_iso((legs[0] or {}).get("depart")) if legs else None
         end = _parse_iso((legs[-1] or {}).get("arrive")) if legs else None
@@ -1300,7 +1339,8 @@ def _plan_international(cur, origin, destination, date, time_, n):
             resolved = resolve_station_anywhere(cur, a["to"])
             if resolved:
                 risk = assess_transfer(cur, resolved[0], a["to"], buffer_min,
-                                       a["route_name"], b["route_name"], resolved=resolved)
+                                       a["route_name"], b["route_name"], resolved=resolved,
+                                       when=_transfer_time(a.get("arrive"), resolved[0]))
             else:
                 risk = {"assessed": False, "station": a["to"], "buffer_min": buffer_min,
                         "reason": ("This station is not in any of the four national feeds "

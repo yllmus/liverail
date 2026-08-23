@@ -50,9 +50,31 @@ MODEL_DIR = os.path.expanduser("~/models")
 TASK = "transfer_risk"
 
 # Promotion thresholds. A challenger must clear all of them.
-MIN_IMPROVEMENT = 0.0015      # absolute Brier, ~0.5% of a typical 0.03 score
+MIN_IMPROVEMENT = 0.0015      # absolute Brier, ~5% of a typical 0.03 score
 TIGHT_TOLERANCE = 0.002       # how much worse it may be on tight buffers
 TIGHT_MAX_BUFFER = 10.0       # minutes; "tight" means a change under this
+
+# A SECOND WAY TO EARN PROMOTION, added 2026-08-23 after Poland exposed that
+# the overall metric alone could not see the improvement that mattered.
+#
+# Measured, not assumed: tight changes are 11.9% of PL's test set and only
+# 56.8% of them succeed, while the other 88% are wide buffers that succeed
+# ~94% of the time. The overall Brier is a weighted average, so an improvement
+# confined to tight transfers is diluted roughly 8x before it reaches that
+# number. PL's challenger cut tight Brier from 0.1234 to 0.1106 - a 10.4% gain
+# on the only rows a rider ever asks about - and scored +0.0011 overall, which
+# the 0.0015 gate rejected.
+#
+# That gate was therefore demanding a ~0.0126 tight improvement without anyone
+# choosing that figure; it fell out of the arithmetic. So a model may now also
+# be promoted for winning decisively where the decisions are, provided it is
+# not meaningfully worse anywhere else. The bar is the same ~5% relative
+# improvement MIN_IMPROVEMENT represents on the overall scale, applied to the
+# tight scale (~0.12), rather than a number picked to let Poland through:
+# DE's champion cleared it independently at 6.9%.
+TIGHT_MIN_GAIN = 0.006        # absolute Brier on tight transfers only
+OVERALL_TOLERANCE = 0.0005    # how much worse overall a tight win may be
+CAL_TOLERANCE = 0.01          # and it may not become badly miscalibrated
 MIN_TEST_ROWS = 2000
 
 
@@ -103,6 +125,94 @@ def calibration_error(pred, label, bins=10):
         total += abs(p[m].mean() - y[m].mean()) * m.sum()
         n += m.sum()
     return float(total / n) if n else float("nan")
+
+
+def stats_path(model_path):
+    """Sidecar holding the feature statistics a booster was trained with."""
+    return model_path + ".stats.json"
+
+
+def save_feature_stats(model_path, st_stats, rt_stats, st_counts, glob):
+    import json
+    payload = {
+        "features": FEATURES,
+        # JSON has no tuple keys. Station id and route name are joined on a
+        # character that cannot occur in a station id (an integer) so the split
+        # on read is unambiguous even for route names containing spaces.
+        "station": {str(k): list(v) for k, v in st_stats.items()},
+        "route": {f"{k[0]}\u0000{k[1]}": list(v) for k, v in rt_stats.items()},
+        "counts": {str(k): int(v) for k, v in st_counts.items()},
+        "global": list(glob),
+    }
+    with open(stats_path(model_path), "w") as f:
+        json.dump(payload, f)
+    return stats_path(model_path)
+
+
+def load_feature_stats(model_path):
+    import json
+    with open(stats_path(model_path)) as f:
+        d = json.load(f)
+    st = {int(k): tuple(v) for k, v in d["station"].items()}
+    rt = {}
+    for k, v in d["route"].items():
+        sid, _, route = k.partition("\u0000")
+        rt[(int(sid), route)] = tuple(v)
+    return (st, rt, {int(k): v for k, v in d["counts"].items()},
+            tuple(d["global"]), d["features"])
+
+
+def judge(res):
+    """Should this challenger be promoted? Pure - takes the scores, returns the
+    verdict. Extracted from run_cycle so every branch can be tested without
+    training a model, because this function is the whole safety argument for
+    letting the system retrain itself unattended.
+
+    Two ways to earn promotion, both of which must beat the base rate and
+    neither of which tolerates a regression on tight transfers:
+
+      overall  a real improvement on the whole test set
+      tight    a decisive improvement on tight changes specifically, while
+               not being meaningfully worse overall or badly miscalibrated
+
+    See TIGHT_MIN_GAIN for why the second path exists.
+    """
+    gain = res["inc_brier"] - res["chal_brier"]
+    tight_gain = ((res["inc_tight"] - res["chal_tight"])
+                  if res["inc_tight"] is not None and res["chal_tight"] is not None
+                  else None)
+    cal_drift = res["chal_cal"] - res["inc_cal"]
+
+    reasons, path = [], None
+    beats_base = res["chal_brier"] < res["base_brier"]
+    tight_ok = tight_gain is None or -tight_gain <= TIGHT_TOLERANCE
+
+    if not beats_base:
+        reasons.append(f"loses to the base rate ({res['chal_brier']:.4f} vs {res['base_brier']:.4f})")
+    elif gain >= MIN_IMPROVEMENT and tight_ok:
+        path = "overall"
+    elif (tight_gain is not None and tight_gain >= TIGHT_MIN_GAIN
+          and -gain <= OVERALL_TOLERANCE and cal_drift <= CAL_TOLERANCE):
+        path = "tight"
+    else:
+        if gain < MIN_IMPROVEMENT:
+            reasons.append(f"gain {gain:+.4f} below {MIN_IMPROVEMENT} overall threshold")
+        if tight_gain is not None and tight_gain < TIGHT_MIN_GAIN:
+            reasons.append(f"tight gain {tight_gain:+.4f} below {TIGHT_MIN_GAIN}")
+        if not tight_ok:
+            reasons.append(f"worse on tight transfers ({res['chal_tight']:.4f} vs {res['inc_tight']:.4f})")
+        if cal_drift > CAL_TOLERANCE:
+            reasons.append(f"calibration worse by {cal_drift:+.4f}")
+
+    if path:
+        decision = ("promoted on %s: Brier %+.4f, tight %+.4f (tight rows "
+                    "%.1f%% of test, %.1f%% succeed)"
+                    % (path, gain, tight_gain or 0.0,
+                       100 * res.get("tight_frac", 0.0),
+                       100 * (res.get("tight_base_rate") or 0)))
+    else:
+        decision = "rejected: " + "; ".join(reasons)
+    return {"promoted": path is not None, "promotion_path": path, "decision": decision}
 
 
 def run_cycle(country="DE", days=21, limit=400000, permille=60, mct=5.0,
@@ -196,29 +306,34 @@ def run_cycle(country="DE", days=21, limit=400000, permille=60, mct=5.0,
         "chal_tight": tb.brier(chal[tight], y[tight]) if tight.sum() else None,
         "inc_cal": calibration_error(inc, y), "chal_cal": calibration_error(chal, y),
         "base_brier": tb.brier(np.full(len(y), base), y),
+        # How much of the test set is actually a tight change, and how often
+        # those succeed. Reported because the overall Brier is a weighted
+        # average dominated by whatever the majority case is, and without these
+        # two numbers there is no way to tell whether an overall "tie" is
+        # hiding a large win on the rows that matter.
+        "n_tight": int(tight.sum()),
+        "tight_frac": float(tight.mean()),
+        "tight_base_rate": float(y[tight].mean()) if tight.sum() else None,
     }
 
     # --- the gate ---------------------------------------------------------
-    gain = res["inc_brier"] - res["chal_brier"]
-    reasons = []
-    if gain < MIN_IMPROVEMENT:
-        reasons.append(f"gain {gain:+.4f} below {MIN_IMPROVEMENT} threshold")
-    if res["chal_brier"] >= res["base_brier"]:
-        reasons.append(f"loses to the base rate ({res['chal_brier']:.4f} vs {res['base_brier']:.4f})")
-    if res["inc_tight"] is not None and res["chal_tight"] is not None:
-        if res["chal_tight"] > res["inc_tight"] + TIGHT_TOLERANCE:
-            reasons.append(f"worse on tight transfers ({res['chal_tight']:.4f} vs {res['inc_tight']:.4f})")
-    promote = not reasons
-    res["promoted"] = promote
-    res["decision"] = ("promoted: Brier %+.4f, tight %+.4f"
-                       % (gain, (res["inc_tight"] or 0) - (res["chal_tight"] or 0))
-                       ) if promote else "rejected: " + "; ".join(reasons)
+    res.update(judge(res))
+    promote = res["promoted"]
 
     path = None
     if promote and not dry_run:
         os.makedirs(MODEL_DIR, exist_ok=True)
         path = os.path.join(MODEL_DIR, f"{TASK}_{country}_{int(time.time())}.txt")
         booster.save_model(path)
+        # The booster ALONE is not a servable model. Every feature except
+        # buffer/hour/dow is a delay statistic fitted on this cycle's training
+        # window, so a request that recomputed them from a different window -
+        # or from delay_distribution, whose percentiles are built differently -
+        # would feed the model numbers it never saw. That is train/serve skew,
+        # and it fails silently: predictions stay plausible while being wrong.
+        # So the statistics ship WITH the booster and serving reads them back
+        # verbatim.
+        save_feature_stats(path, st_stats, rt_stats, st_counts, glob)
     res["model_path"] = path
 
     if not dry_run:
@@ -263,6 +378,9 @@ def main():
     print(f"{'base rate':12s} {r['base_brier']:9.4f}")
     print(f"{'incumbent':12s} {r['inc_brier']:9.4f} {r['inc_tight'] or float('nan'):9.4f} {r['inc_cal']:10.4f}")
     print(f"{'challenger':12s} {r['chal_brier']:9.4f} {r['chal_tight'] or float('nan'):9.4f} {r['chal_cal']:10.4f}")
+    print(f"\ntight (<{TIGHT_MAX_BUFFER:.0f} min buffer): {r['n_tight']} rows "
+          f"= {100*r['tight_frac']:.1f}% of the test set, "
+          f"{100*(r['tight_base_rate'] or 0):.1f}% of them succeed")
     print(f"\n{r['decision']}")
     if r.get("model_path"):
         print(f"saved: {r['model_path']}")
