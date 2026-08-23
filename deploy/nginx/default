@@ -8,7 +8,7 @@ server {
 
 	# Train delay tracker (trainapi.service, uvicorn on 8000): same-origin
 	# proxy so the frontend never has to hardcode this box's public IP.
-	location ~ ^/(search|countries|stations|routes|station|route|train/|operators|heatmap|trend|live|t/|sitemap\.xml|robots\.txt|compensation/|out/|partner-links|health|plan|distribution|transfer/) {
+	location ~ ^/(search|countries|stations|routes|station|route|train/|operators|heatmap|trend|live|t/|sitemap\.xml|robots\.txt|compensation/|out/|partner-links|health|plan|distribution|transfer/|push/) {
 		limit_req zone=trainapi_general burst=40 nodelay;
 		proxy_pass http://127.0.0.1:8000;
 		proxy_set_header Host $host;
