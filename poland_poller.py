@@ -29,7 +29,32 @@ def fetch_feed():
     feed.ParseFromString(resp.content)
     return feed
 
-def parse_pl_vehicles(feed):
+def _stu_epoch(stu):
+    if stu.HasField("arrival") and stu.arrival.time:
+        return stu.arrival.time
+    if stu.HasField("departure") and stu.departure.time:
+        return stu.departure.time
+    return None
+
+
+def _current_stop_update(updates, now_epoch):
+    """The stop this train is heading for right now.
+
+    The first update whose time has not yet passed; if the whole trip is in the
+    past, the last one; if nothing carries a time, the first, which is the old
+    behaviour and keeps malformed entries working exactly as before.
+    """
+    timed = [(u, _stu_epoch(u)) for u in updates]
+    timed = [(u, t) for u, t in timed if t]
+    if not timed:
+        return updates[0]
+    for u, t in timed:
+        if t >= now_epoch:
+            return u
+    return timed[-1][0]
+
+
+def parse_pl_vehicles(feed, now_epoch=None):
     # Pure extraction, no DB. Confirmed against the real feed: mkuran.pl's
     # TripUpdates never set stop_id, route_id, or a delay field - only
     # stop_sequence and absolute Unix timestamps (arrival.time/departure.time).
@@ -37,6 +62,8 @@ def parse_pl_vehicles(feed):
     # static feed's stop_times (imported via `import.py --with-stop-times`),
     # done separately in resolve_delays() so this stays DB-independent and
     # unit-testable, same as parse_vehicles()/parse_at_vehicles().
+    if now_epoch is None:
+        now_epoch = time.time()
     rows = []
     for entity in feed.entity:
         if not entity.HasField("trip_update"):
@@ -65,11 +92,27 @@ def parse_pl_vehicles(feed):
 
         if not trip_update.stop_time_update:
             continue
-        # Take the first stop_time_update only, same choice the original
-        # design made (and the same choice AT's nextStopovers[0] makes) -
-        # one "current" delay figure per trip per poll, not a prediction
-        # for every remaining stop on the route.
-        stu = trip_update.stop_time_update[0]
+        # The stop the train is actually AT, not stop_time_update[0].
+        #
+        # [0] was the original choice, by analogy with AT's nextStopovers[0].
+        # It is wrong for this feed, and measurably so: mkuran.pl publishes the
+        # WHOLE trip starting at stop_sequence 0, including trips that do not
+        # depart for another two or three hours. So [0] is always the trip's
+        # ORIGIN. It never advances as the train runs, which had two
+        # consequences:
+        #   * the recorded "delay" was the delay at the origin - frequently a
+        #     forecast for a train that had not left yet - rather than where
+        #     the train was;
+        #   * every trip produced exactly one distinct stop per day. Poland
+        #     held 6.45M observations across 182,682 trip-days at 1.00 stops
+        #     each, so the country with the most data had no journeys in it at
+        #     all, and no per-train forecast could be built from it.
+        # Germany never had this because its feed publishes only REMAINING
+        # stops, so its [0] advances naturally.
+        #
+        # Picking the next stop whose time has not yet passed tracks the train
+        # along its route, one row per stop it actually reaches.
+        stu = _current_stop_update(trip_update.stop_time_update, now_epoch)
 
         # A SKIPPED stop means the train runs but is not calling here. It has
         # no arrival/departure time (there is no arrival to predict), so it
@@ -348,18 +391,36 @@ def poll():
     # repeat-every-poll noise this dedup was written for.
     trip_ids = [row["trip_id"] for row in resolved]
     cur.execute("""
-        SELECT DISTINCT ON (trip_id) trip_id, delay_minutes, is_cancelled
+        SELECT DISTINCT ON (trip_id, station_id) trip_id, station_id,
+               delay_minutes, is_cancelled
         FROM delay_observations
         WHERE trip_id = ANY(%s) AND observed_date = %s
-        ORDER BY trip_id, id DESC
+        ORDER BY trip_id, station_id, id DESC
     """, (trip_ids, date.today()))
-    last_state = {r[0]: (r[1], bool(r[2])) for r in cur.fetchall()}
+    last_state = {(r[0], r[1]): (r[2], bool(r[3])) for r in cur.fetchall()}
 
     count = 0
     skipped = 0
     cancelled_count = 0
     for row in resolved:
-        if last_state.get(row["trip_id"]) == (row["delay_minutes"], row["is_cancelled"]):
+        # Keyed on (trip, STATION), not on the trip alone.
+        #
+        # Keying on the trip alone skipped the insert whenever the delay was
+        # unchanged - including when the train had moved on to a completely
+        # different stop. The row that would have recorded "this train reached
+        # the next station, still 4 minutes down" was thrown away as a
+        # duplicate, so Poland held 6.45M observations and exactly ZERO
+        # journeys: 182,682 trip-days, every one of them at 1.0 distinct stops.
+        # That is the whole trajectory signal, and no forecast can be built
+        # without it.
+        #
+        # Germany never had this problem because its dedup already keyed on
+        # (trip_id, stop_sequence), which is why DE is the only country with
+        # usable trajectories today. Genuinely redundant repeats - same train,
+        # same stop, same delay - are still skipped, so this adds at most one
+        # row per stop a train actually calls at.
+        if last_state.get((row["trip_id"], row["station_id"])) == (
+                row["delay_minutes"], row["is_cancelled"]):
             skipped += 1
             continue
         if row["is_cancelled"]:

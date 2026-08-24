@@ -290,3 +290,67 @@ def test_interpolate_position_returns_none_without_a_previous_stop():
     )
     assert lat is None
     assert lon is None
+
+
+# --- which stop the train is actually at -----------------------------------
+# mkuran.pl publishes the WHOLE trip from stop_sequence 0, including trips that
+# have not departed yet, so taking stop_time_update[0] pinned every reading to
+# the trip's origin. These pin the replacement.
+
+class _FakeTime:
+    def __init__(self, t): self.time = t
+    def HasField(self, _): return True
+
+
+class _FakeStu:
+    def __init__(self, seq, t, has_arrival=True):
+        self.stop_sequence = seq
+        self.arrival = _FakeTime(t if has_arrival else 0)
+        self.departure = _FakeTime(t if not has_arrival else 0)
+        self._has_arrival = has_arrival
+
+    def HasField(self, name):
+        return name == ("arrival" if self._has_arrival else "departure")
+
+
+def test_picks_the_next_stop_not_the_origin():
+    from poland_poller import _current_stop_update
+    now = 1_000_000
+    stops = [_FakeStu(0, now - 1800), _FakeStu(1, now - 600),
+             _FakeStu(2, now + 300), _FakeStu(3, now + 900)]
+    assert _current_stop_update(stops, now).stop_sequence == 2
+
+
+def test_advances_as_the_train_runs():
+    """The whole point: the same trip must report a DIFFERENT stop later on,
+    or a day of polling yields one row and no journey."""
+    from poland_poller import _current_stop_update
+    base = 1_000_000
+    stops = [_FakeStu(i, base + i * 600) for i in range(6)]
+    seen = {_current_stop_update(stops, base + t).stop_sequence
+            for t in (0, 700, 1300, 1900, 2500)}
+    assert len(seen) >= 4
+
+
+def test_trip_entirely_in_the_past_uses_its_last_stop():
+    from poland_poller import _current_stop_update
+    now = 1_000_000
+    stops = [_FakeStu(0, now - 3600), _FakeStu(1, now - 1800)]
+    assert _current_stop_update(stops, now).stop_sequence == 1
+
+
+def test_not_yet_departed_trip_still_reports_its_origin():
+    """Unchanged behaviour for a trip that has not started - its next stop IS
+    the origin, so nothing regresses for those."""
+    from poland_poller import _current_stop_update
+    now = 1_000_000
+    stops = [_FakeStu(0, now + 6000), _FakeStu(1, now + 6600)]
+    assert _current_stop_update(stops, now).stop_sequence == 0
+
+
+def test_departure_only_stop_is_still_usable():
+    from poland_poller import _current_stop_update
+    now = 1_000_000
+    stops = [_FakeStu(0, now - 100, has_arrival=False),
+             _FakeStu(1, now + 100, has_arrival=False)]
+    assert _current_stop_update(stops, now).stop_sequence == 1
