@@ -111,3 +111,4 @@
 !retrain.sh
 !delay_forecast.py
 !forecast.py
+!migrate.sh
