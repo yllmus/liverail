@@ -91,6 +91,29 @@ def load_observations(cur, country, days, max_rows=1_400_000):
     IS recoverable (a stop_times join) it is used for the horizon instead.
     """
     ident = "d.route_name" if country == "HU" else "d.trip_id::text"
+
+    # SAMPLE WHOLE TRIPS ACROSS THE WHOLE WINDOW, rather than taking the
+    # newest N rows.
+    #
+    # A LIMIT keeps whichever end of the period it is ordered by, and for
+    # Germany that is fatal: its 21-day window contains the 12-day outage, so
+    # the newest 1.4M rows cover barely four days and no chronological
+    # train/calibration/test split can fit in them. Hashing the identity and
+    # keeping a deterministic fraction preserves entire journeys - which
+    # sampling individual rows would destroy - while spanning every day in the
+    # period.
+    cur.execute(f"""
+        SELECT count(*) FROM delay_observations d
+        WHERE d.country_code = %s AND d.delay_minutes IS NOT NULL
+          AND NOT d.is_cancelled AND d.station_id IS NOT NULL
+          AND {ident} IS NOT NULL AND d.observed_date >= current_date - %s
+    """, (country, days))
+    total = cur.fetchone()[0] or 0
+    keep_frac = min(1.0, max_rows / total) if total else 1.0
+    modulus = max(1, int(round(1.0 / keep_frac))) if keep_frac < 1.0 else 1
+    sample_clause = ("" if modulus == 1 else
+                     f"AND abs(hashtext({ident})) %% {modulus} = 0")
+
     cur.execute(f"""
         SELECT {ident} AS ident, d.observed_date, d.station_id, d.route_name,
                d.delay_minutes, d.actual_arrival, st.stop_sequence
@@ -104,47 +127,55 @@ def load_observations(cur, country, days, max_rows=1_400_000):
           AND {ident} IS NOT NULL
           AND d.observed_date >= current_date - %s
           {"AND d.route_name NOT LIKE '%%/%%'" if country == "HU" else ""}
-        ORDER BY d.id DESC
-        LIMIT %s
-    """, (country, MAX_ABS_DELAY, days, max_rows))
+          {sample_clause}
+        ORDER BY d.id
+    """, (country, MAX_ABS_DELAY, days))
     obs = []
     for ident_v, day, sid, route, delay, t, seq in cur.fetchall():
         obs.append({"ident": ident_v, "day": day, "station_id": sid,
                     "route": route, "delay": float(delay), "t": t, "seq": seq})
-    # Most RECENT rows, then put them back in time order. Taking the oldest
-    # instead would spend the row budget on August 2-7 and cut off the two
-    # richest days entirely.
-    obs.reverse()
     return obs
 
 
 def split_days(rows, train_frac=0.6, calib_frac=0.75):
     """Chronological cut points chosen by SAMPLE MASS, not by counting days.
 
-    Germany lost 99.7% of its observations for twelve days (2026-08-08..19,
-    see NOTES.md). Splitting on the day INDEX put the whole calibration window
-    inside that dead zone and produced a calibration set of exactly zero rows.
-    Day-shaped holes are a normal fact of feed-derived data, so the split is
-    made on cumulative sample counts and only snapped to day boundaries, which
-    keeps the chronological separation without assuming days are equal size.
+    Two distinct failures forced this, both found by running:
+
+    1. Germany lost 99.7% of its observations for twelve days (2026-08-08..19).
+       Splitting on the day INDEX put the whole calibration window inside that
+       dead zone and produced zero calibration rows.
+    2. Splitting on mass alone then failed the opposite way: Germany's recent
+       days are so much larger than its older ones that 60% of the mass is not
+       reached until the FINAL day, so both cut points landed on the same date
+       and the calibration set was empty again.
+
+    An empty calibration set is not a cosmetic problem - it silently voids the
+    conformal coverage guarantee, which is the one output here that comes with
+    a promise. So the cuts are chosen by mass and then forced to be distinct
+    days with rows on both sides.
     """
     per_day = defaultdict(int)
     for r in rows:
         per_day[r["day"]] += 1
     days = sorted(per_day)
+    if len(days) < 3:
+        return (days[0], days[-1]) if days else (None, None)
     total = sum(per_day.values())
-    cum, d_tr, d_ca = 0, None, None
+
+    cum, frac = 0, {}
     for d in days:
         cum += per_day[d]
-        if d_tr is None and cum >= total * train_frac:
-            d_tr = d
-        elif d_ca is None and cum >= total * calib_frac:
-            d_ca = d
-            break
-    if d_tr is None:
-        d_tr = days[max(0, len(days) - 2)]
-    if d_ca is None:
-        d_ca = days[-1]
+        frac[d] = cum / total
+
+    # The training cut may be neither the first day (train would be empty) nor
+    # the last (nothing left for calibration and test). If no eligible day
+    # reaches the target fraction - which happens when the mass sits at the end
+    # of the window - take the latest eligible day rather than giving up.
+    eligible = days[1:-1]
+    d_tr = next((d for d in eligible if frac[d] >= train_frac), eligible[-1])
+    later = [d for d in days if d > d_tr]
+    d_ca = next((d for d in later if frac[d] >= calib_frac), later[-1])
     return d_tr, d_ca
 
 
@@ -192,6 +223,30 @@ class Congestion:
         l = clate[hi - 1] - (clate[lo - 1] if lo > 0 else 0.0)
         return (float(n), float(s / n), float(l / n))
 
+    def last_before(self, sid, ts, k=2):
+        """The k most recent readings at this station strictly before ts, as
+        (delay, minutes_ago) pairs.
+
+        THIS IS THE TRAIN-LEVEL VERSION OF CONGESTION, and it exists because
+        the hourly aggregate version did not work. An hour-wide mean at a
+        station washes out exactly the effect DELAY_STRUCTURE.md measured: a
+        specific train handing its delay to a specific later train 10-75
+        minutes behind it, at 4.4x the rate chance produces. The published
+        state of the art reaches for the same granularity - "movements within
+        a +/-5-minute window" - rather than an hourly average.
+
+        Strictly before ts, so the row being predicted can never be inside it.
+        """
+        idx = self.st.get(sid)
+        if idx is None:
+            return []
+        a, d, _c, _l = idx
+        hi = np.searchsorted(a, ts, side="left")
+        out = []
+        for j in range(hi - 1, max(-1, hi - 1 - k), -1):
+            out.append((float(d[j]), (ts - a[j]) / 60.0))
+        return out
+
     def station(self, sid, ts, minutes):
         idx = self.st.get(sid)
         return (0.0, np.nan, np.nan) if idx is None else self._window(idx, ts, minutes)
@@ -213,12 +268,16 @@ BASE_FEATURES = [
     "cur_st_p50", "cur_st_p90",
     "route_p50", "route_p90", "route_n",
     "trainstop_p50", "trainstop_p90", "trainstop_n",
+    "linestop_p50", "linestop_p90", "linestop_n",
     # congestion, strictly before the prediction instant
     "tgt_cong_n_15", "tgt_cong_mean_15", "tgt_cong_late_15",
     "tgt_cong_n_60", "tgt_cong_mean_60", "tgt_cong_late_60",
     "cur_cong_n_15", "cur_cong_mean_15", "cur_cong_late_15",
     "cur_cong_n_60", "cur_cong_mean_60", "cur_cong_late_60",
     "nat_cong_n_60", "nat_cong_mean_60", "nat_cong_late_60",
+    # the train immediately ahead - see Congestion.last_before
+    "tgt_prev_delay", "tgt_prev_age", "tgt_prev2_delay",
+    "cur_prev_delay", "cur_prev_age",
 ]
 STAGE2_FEATURES = BASE_FEATURES + [f"p_band_{n}" for n in BAND_NAMES]
 
@@ -305,26 +364,55 @@ def _q(vals):
     return (float(np.median(a)), float(np.quantile(a, 0.9)), float(len(a)))
 
 
-def fit_history(rows):
-    """Station, route, and this-train-at-this-stop statistics. TRAIN ONLY.
+def attach_history(rows):
+    """Attach history features computed ONLY from strictly earlier days.
 
-    The third one is the important one and mirrors delay_distribution's 'trip'
-    rung: how does THIS service behave at THIS stop, which is a far sharper
-    signal than either the station or the route alone - and the thing a rider
-    means when they say "that train is always late into there".
+    THIS REPLACES A VERSION THAT LEAKED BADLY, and the failure is worth
+    recording because it presented as a modelling problem rather than a data
+    one.
+
+    The old version fitted "this train at this stop" on the labels of the
+    training rows themselves. Germany reissues trip_id every service day, so a
+    given trip usually appears on exactly ONE day - meaning its statistic was
+    the median of its own labels, i.e. the answer. The model duly ranked
+    trainstop_p90 its single most valuable feature and then lost to persistence
+    by 60%, because at test time that feature is absent for a trip never seen
+    before. Enormous training gain plus catastrophic test error is the
+    signature of precisely this.
+
+    An expanding window fixes it, and is also what production actually does: to
+    predict a train today you may use every day up to yesterday and nothing
+    from today. Rows are processed in day order and a day's labels only join
+    the history after every row in that day has been featurised.
     """
-    st, rt, ts_ = defaultdict(list), defaultdict(list), defaultdict(list)
-    for r in rows:
-        st[r["station_id"]].append(r["label"])
-        rt[r["route"]].append(r["label"])
-        ts_[(r["ident"], r["station_id"])].append(r["label"])
-    return ({k: _q(v) for k, v in st.items()},
-            {k: _q(v) for k, v in rt.items()},
-            {k: _q(v) for k, v in ts_.items() if len(v) >= 3})
+    st, rt, ts_, ls_ = (defaultdict(list), defaultdict(list),
+                        defaultdict(list), defaultdict(list))
+    ordered = sorted(rows, key=lambda r: r["day"])
+    i = 0
+    while i < len(ordered):
+        day = ordered[i]["day"]
+        j = i
+        while j < len(ordered) and ordered[j]["day"] == day:
+            r = ordered[j]
+            r["_hist"] = (
+                _q(st.get(r["station_id"], [])),
+                _q(st.get(r["from_station"], [])),
+                _q(rt.get(r["route"], [])),
+                _q(ts_.get((r["ident"], r["station_id"]), [])),
+                _q(ls_.get((r["route"], r["station_id"]), [])),
+            )
+            j += 1
+        for k in range(i, j):
+            r = ordered[k]
+            st[r["station_id"]].append(r["label"])
+            rt[r["route"]].append(r["label"])
+            ts_[(r["ident"], r["station_id"])].append(r["label"])
+            ls_[(r["route"], r["station_id"])].append(r["label"])
+        i = j
+    return rows
 
 
-def matrix(rows, hist, cong):
-    st_h, rt_h, tr_h = hist
+def matrix(rows, cong):
     idx = {f: i for i, f in enumerate(BASE_FEATURES)}
     X = np.full((len(rows), len(BASE_FEATURES)), np.nan, dtype=np.float32)
     for n, r in enumerate(rows):
@@ -334,19 +422,22 @@ def matrix(rows, hist, cong):
             v = r.get(f)
             if v is not None:
                 X[n, idx[f]] = v
-        s = st_h.get(r["station_id"])
-        if s:
-            X[n, idx["tgt_st_p50"]], X[n, idx["tgt_st_p90"]], X[n, idx["tgt_st_n"]] = s
-        cs = st_h.get(r["from_station"])
-        if cs:
-            X[n, idx["cur_st_p50"]], X[n, idx["cur_st_p90"]] = cs[0], cs[1]
-        rr = rt_h.get(r["route"])
-        if rr:
-            X[n, idx["route_p50"]], X[n, idx["route_p90"]], X[n, idx["route_n"]] = rr
-        tr = tr_h.get((r["ident"], r["station_id"]))
-        if tr:
-            (X[n, idx["trainstop_p50"]], X[n, idx["trainstop_p90"]],
-             X[n, idx["trainstop_n"]]) = tr
+        tgt_st, cur_st, rr, tr, ln = r["_hist"]
+        X[n, idx["tgt_st_p50"]], X[n, idx["tgt_st_p90"]], X[n, idx["tgt_st_n"]] = tgt_st
+        X[n, idx["cur_st_p50"]], X[n, idx["cur_st_p90"]] = cur_st[0], cur_st[1]
+        X[n, idx["route_p50"]], X[n, idx["route_p90"]], X[n, idx["route_n"]] = rr
+        (X[n, idx["trainstop_p50"]], X[n, idx["trainstop_p90"]],
+         X[n, idx["trainstop_n"]]) = tr
+        # Line-level history, keyed on (route, station) rather than on the
+        # trip. It exists because trainstop_* is the strongest feature in both
+        # countries and Germany can barely populate it: DE reissues trip_id
+        # every service day, so only 4.0% of its (trip, station) pairs recur
+        # on 3+ days, against 62.7% for Hungary - which is the whole reason DE
+        # gains +0.8% on MAE where HU gains +18.3%. (route, station) is stable
+        # across days for every country and spans the entire archive, so it
+        # gives DE a dense version of the signal that was carrying HU.
+        (X[n, idx["linestop_p50"]], X[n, idx["linestop_p90"]],
+         X[n, idx["linestop_n"]]) = ln
         ts = r["ts"]
         for w in CONGESTION_WINDOWS:
             cn, cm, cl = cong.station(r["station_id"], ts, w)
@@ -357,6 +448,16 @@ def matrix(rows, hist, cong):
             X[n, idx[f"cur_cong_n_{w}"]] = fn
             X[n, idx[f"cur_cong_mean_{w}"]] = fm
             X[n, idx[f"cur_cong_late_{w}"]] = fl
+        prev = cong.last_before(r["station_id"], ts, 2)
+        if prev:
+            X[n, idx["tgt_prev_delay"]] = prev[0][0]
+            X[n, idx["tgt_prev_age"]] = prev[0][1]
+            if len(prev) > 1:
+                X[n, idx["tgt_prev2_delay"]] = prev[1][0]
+        cprev = cong.last_before(r["from_station"], ts, 1)
+        if cprev:
+            X[n, idx["cur_prev_delay"]] = cprev[0][0]
+            X[n, idx["cur_prev_age"]] = cprev[0][1]
         nn, nm, nl = cong.nation(ts, 60)
         X[n, idx["nat_cong_n_60"]] = nn
         X[n, idx["nat_cong_mean_60"]] = nm
@@ -416,8 +517,10 @@ def run(country="DE", days=21, max_horizon=8, seed=0, rounds=300):
         return {"error": (f"{country}: split too small "
                           f"({len(train)}/{len(calib)}/{len(test)})")}
 
-    hist = fit_history(train)
-    Xtr, Xca, Xte = (matrix(s, hist, cong) for s in (train, calib, test))
+    # Featurised over ALL rows, because history must expand across the split
+    # boundaries in day order - not be fitted on the training split.
+    attach_history(rows)
+    Xtr, Xca, Xte = (matrix(s, cong) for s in (train, calib, test))
     ytr = np.asarray([r["label"] for r in train], dtype=np.float32)
     yca = np.asarray([r["label"] for r in calib], dtype=np.float32)
     yte = np.asarray([r["label"] for r in test], dtype=np.float32)
