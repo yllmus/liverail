@@ -109,8 +109,8 @@ sudo -u postgres psql -c "CREATE ROLE trainuser LOGIN PASSWORD '<same password>'
 sudo -u postgres createdb train_delay_db
 sudo -u postgres psql train_delay_db -f schema/schema.sql
 for f in schema/01[0-7]_*.sql; do sudo -u postgres psql train_delay_db -f "$f"; done
+sudo -u postgres psql train_delay_db -c "INSERT INTO countries (code, name) VALUES ('HU', 'Hungary'), ('AT', 'Austria'), ('PL', 'Poland'), ('DE', 'Germany')"
 sudo -u postgres psql train_delay_db -f schema/compensation_rules_seed.sql -f schema/partner_links_seed.sql
-sudo -u postgres psql train_delay_db -c "INSERT INTO countries (code, name) VALUES ('HU', 'Hungary')"
 sudo -u postgres psql train_delay_db -c "GRANT ALL ON ALL TABLES IN SCHEMA public TO trainuser; GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO trainuser"
 
 cd backend

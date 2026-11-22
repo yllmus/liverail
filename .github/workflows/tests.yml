@@ -21,6 +21,9 @@ jobs:
           --health-retries 10
     env:
       TRAIN_DB_PASSWORD: ci
+      # Stop at the first SQL error, so a broken setup fails this step
+      # instead of surfacing later as confusing test failures.
+      PSQL: psql -v ON_ERROR_STOP=1 -q
       TRAIN_DB_HOST: localhost
       PGHOST: localhost
       PGUSER: postgres
@@ -41,14 +44,15 @@ jobs:
       # There is no observation data, so tests marked real_data skip and say why.
       - name: Create the database from schema/
         run: |
-          psql -c "CREATE ROLE trainuser LOGIN PASSWORD 'ci'"
-          psql -c "CREATE DATABASE train_delay_db"
-          psql -q -d train_delay_db -f schema/schema.sql
-          for f in schema/01[0-7]_*.sql; do psql -q -d train_delay_db -f "$f"; done
-          psql -q -d train_delay_db -f schema/compensation_rules_seed.sql -f schema/partner_links_seed.sql
-          psql -q -d train_delay_db -c "INSERT INTO countries (code, name) VALUES
+          $PSQL -c "CREATE ROLE trainuser LOGIN PASSWORD 'ci'"
+          $PSQL -c "CREATE DATABASE train_delay_db"
+          $PSQL -d train_delay_db -f schema/schema.sql
+          for f in schema/01[0-7]_*.sql; do $PSQL -d train_delay_db -f "$f"; done
+          # Countries first: the reference data has foreign keys to them.
+          $PSQL -d train_delay_db -c "INSERT INTO countries (code, name) VALUES
               ('HU', 'Hungary'), ('AT', 'Austria'), ('PL', 'Poland'), ('DE', 'Germany')"
-          psql -q -d train_delay_db -c "GRANT ALL ON ALL TABLES IN SCHEMA public TO trainuser;
+          $PSQL -d train_delay_db -f schema/compensation_rules_seed.sql -f schema/partner_links_seed.sql
+          $PSQL -d train_delay_db -c "GRANT ALL ON ALL TABLES IN SCHEMA public TO trainuser;
               GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO trainuser"
 
       - name: Run every test, including the slow ones
