@@ -338,78 +338,79 @@ def resolve_delays(cur, rows, parent_map=None, now_epoch=None, platform_map=None
 
 def poll():
     conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    print("Polling gtfs.de...")
-    feed = fetch_feed()
-    raw_rows = parse_de_vehicles(feed)
-    print(f"Got {len(raw_rows)} raw stop-time updates")
-    resolved = resolve_delays(cur, raw_rows)
-    print(f"Resolved {len(resolved)}/{len(raw_rows)} against known DE stations/trips")
+    try:
+        cur = conn.cursor()
+        print("Polling gtfs.de...")
+        feed = fetch_feed()
+        raw_rows = parse_de_vehicles(feed)
+        print(f"Got {len(raw_rows)} raw stop-time updates")
+        resolved = resolve_delays(cur, raw_rows)
+        print(f"Resolved {len(resolved)}/{len(raw_rows)} against known DE stations/trips")
 
-    # Same fix as poland_poller.py: gtfs.de's feed re-reports an unchanged
-    # delay for a trip across many consecutive polls, so only write a row
-    # when the delay actually changed since the trip's last observation.
-    # Scoped to today - see the same block in poland_poller.py for why the
-    # unscoped version silently dropped every recurring trip whose delay
-    # matched its last recorded value (43.2% of DE trip_ids recur across days).
-    # Compared as a (delay, cancelled) pair - see the same block in
-    # poland_poller.py for why the delay alone is not enough once a row can be
-    # cancelled (a cancellation carries delay NULL, and NULL == NULL here
-    # would otherwise re-write an identical cancelled row every 5 minutes).
-    # Keyed per (trip, stop), not per trip. Since parse_de_vehicles now emits
-    # every remaining stop rather than only the current one, a trip-level key
-    # would compare a stop's delay against a different stop's last value and
-    # write on nearly every comparison - the dedup would stop working exactly
-    # when it started mattering. This is also what bounds the extra volume:
-    # a stop is written when its own prediction changes, not once per poll.
-    trip_ids = [row["trip_id"] for row in resolved]
-    cur.execute("""
-        SELECT DISTINCT ON (trip_id, stop_sequence) trip_id, stop_sequence,
-               delay_minutes, is_cancelled
-        FROM delay_observations
-        WHERE trip_id = ANY(%s) AND observed_date = %s
-        ORDER BY trip_id, stop_sequence, id DESC
-    """, (trip_ids, date.today()))
-    last_state = {(r[0], r[1]): (r[2], bool(r[3])) for r in cur.fetchall()}
-
-    count = 0
-    skipped = 0
-    cancelled_count = 0
-    for row in resolved:
-        prev = last_state.get((row["trip_id"], row.get("stop_sequence")))
-        if prev is not None and prev[1] == row["is_cancelled"] \
-                and prev[0] is not None and row["delay_minutes"] is not None \
-                and abs(row["delay_minutes"] - prev[0]) < MIN_DELAY_CHANGE_MIN:
-            # Unchanged, or changed by less than a minute - see
-            # MIN_DELAY_CHANGE_MIN. A cancellation flag flipping is never
-            # suppressed, however small the delay difference.
-            skipped += 1
-            continue
-        if prev == (row["delay_minutes"], row["is_cancelled"]):
-            skipped += 1
-            continue
-        if row["is_cancelled"]:
-            cancelled_count += 1
-            print(f"  {row['route_name']} at {row['station_name']}: CANCELLED ({row['cancellation_kind']})")
-        else:
-            print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
+        # Same fix as poland_poller.py: gtfs.de's feed re-reports an unchanged
+        # delay for a trip across many consecutive polls, so only write a row
+        # when the delay actually changed since the trip's last observation.
+        # Scoped to today - see the same block in poland_poller.py for why the
+        # unscoped version silently dropped every recurring trip whose delay
+        # matched its last recorded value (43.2% of DE trip_ids recur across days).
+        # Compared as a (delay, cancelled) pair - see the same block in
+        # poland_poller.py for why the delay alone is not enough once a row can be
+        # cancelled (a cancellation carries delay NULL, and NULL == NULL here
+        # would otherwise re-write an identical cancelled row every 5 minutes).
+        # Keyed per (trip, stop), not per trip. Since parse_de_vehicles now emits
+        # every remaining stop rather than only the current one, a trip-level key
+        # would compare a stop's delay against a different stop's last value and
+        # write on nearly every comparison - the dedup would stop working exactly
+        # when it started mattering. This is also what bounds the extra volume:
+        # a stop is written when its own prediction changes, not once per poll.
+        trip_ids = [row["trip_id"] for row in resolved]
         cur.execute("""
-            INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, lat, lon, position_source, trip_id, cancellation_kind, platform,
-                 stop_sequence, scheduled_arrival, scheduled_departure, delay_arrival_minutes, delay_departure_minutes)
-            VALUES (%s, CURRENT_DATE, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            row["station_id"], row["delay_minutes"], row["is_cancelled"], row["route_name"],
-            COUNTRY_CODE, row["lat"], row["lon"], row["position_source"], row["trip_id"],
-            row["cancellation_kind"], row["platform"],
-            row.get("stop_sequence"), row.get("scheduled_arrival"), row.get("scheduled_departure"),
-            row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
-        ))
-        count += 1
-    conn.commit()
-    cur.close()
-    conn.close()
-    print(f"Saved {count} observations ({cancelled_count} cancelled), skipped {skipped} unchanged.")
+            SELECT DISTINCT ON (trip_id, stop_sequence) trip_id, stop_sequence,
+                   delay_minutes, is_cancelled
+            FROM delay_observations
+            WHERE trip_id = ANY(%s) AND observed_date = %s
+            ORDER BY trip_id, stop_sequence, id DESC
+        """, (trip_ids, date.today()))
+        last_state = {(r[0], r[1]): (r[2], bool(r[3])) for r in cur.fetchall()}
+
+        count = 0
+        skipped = 0
+        cancelled_count = 0
+        for row in resolved:
+            prev = last_state.get((row["trip_id"], row.get("stop_sequence")))
+            if prev is not None and prev[1] == row["is_cancelled"] \
+                    and prev[0] is not None and row["delay_minutes"] is not None \
+                    and abs(row["delay_minutes"] - prev[0]) < MIN_DELAY_CHANGE_MIN:
+                # Unchanged, or changed by less than a minute - see
+                # MIN_DELAY_CHANGE_MIN. A cancellation flag flipping is never
+                # suppressed, however small the delay difference.
+                skipped += 1
+                continue
+            if prev == (row["delay_minutes"], row["is_cancelled"]):
+                skipped += 1
+                continue
+            if row["is_cancelled"]:
+                cancelled_count += 1
+                print(f"  {row['route_name']} at {row['station_name']}: CANCELLED ({row['cancellation_kind']})")
+            else:
+                print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
+            cur.execute("""
+                INSERT INTO delay_observations
+                    (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, lat, lon, position_source, trip_id, cancellation_kind, platform,
+                     stop_sequence, scheduled_arrival, scheduled_departure, delay_arrival_minutes, delay_departure_minutes)
+                VALUES (%s, CURRENT_DATE, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                row["station_id"], row["delay_minutes"], row["is_cancelled"], row["route_name"],
+                COUNTRY_CODE, row["lat"], row["lon"], row["position_source"], row["trip_id"],
+                row["cancellation_kind"], row["platform"],
+                row.get("stop_sequence"), row.get("scheduled_arrival"), row.get("scheduled_departure"),
+                row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
+            ))
+            count += 1
+        conn.commit()
+        print(f"Saved {count} observations ({cancelled_count} cancelled), skipped {skipped} unchanged.")
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     poll()

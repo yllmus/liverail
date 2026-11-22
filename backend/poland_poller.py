@@ -351,93 +351,94 @@ def resolve_delays(cur, rows, now_epoch=None):
 
 def poll():
     conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    print("Polling PKP...")
-    feed = fetch_feed()
-    raw_rows = parse_pl_vehicles(feed)
-    print(f"Got {len(raw_rows)} raw stop-time updates")
-    resolved = resolve_delays(cur, raw_rows)
-    print(f"Resolved {len(resolved)}/{len(raw_rows)} against known stations/schedule")
+    try:
+        cur = conn.cursor()
+        print("Polling PKP...")
+        feed = fetch_feed()
+        raw_rows = parse_pl_vehicles(feed)
+        print(f"Got {len(raw_rows)} raw stop-time updates")
+        resolved = resolve_delays(cur, raw_rows)
+        print(f"Resolved {len(resolved)}/{len(raw_rows)} against known stations/schedule")
 
-    # mkuran.pl's first stop_time_update for a trip stays the same predicted
-    # stop for many consecutive polls until the train actually reaches it -
-    # writing a fresh row every 5 min regardless was the dominant driver of
-    # DB growth (confirmed: ~1.5-1.8M PL rows/day, ~193x more than the
-    # distinct (trip_id, delay_minutes) pairs actually observed). Only write
-    # a new row when the delay for a trip has actually changed since its
-    # last recorded observation.
-    # Scoped to TODAY, which the first version of this wasn't - and that was a
-    # real data-integrity bug, not a nuance. 92.8% of PL trip_ids recur across
-    # days (DE 43.2%, both measured), and ~71% of PL rows are exactly 0.0
-    # minutes, so an unscoped "has this trip's delay changed since its last
-    # observation" meant a train that runs punctually every day was recorded
-    # once and then never again - every later day silently vanished. Comparing
-    # within the service day gives each trip at least one row per day while
-    # still collapsing the repeat-every-5-minutes noise this was written for.
-    # Compared as a (delay, cancelled) pair, not delay alone: a trip that gets
-    # cancelled goes from some delay to delay NULL, and a NULL never equals
-    # anything in Python's `==` sense against a float - but a trip already
-    # recorded as cancelled would otherwise re-write an identical row every
-    # 5 minutes for the rest of the day, since NULL == NULL is True here.
-    # Pairing them keeps both transitions (running -> cancelled and cancelled
-    # -> running again) as real, recorded events while still collapsing the
-    # repeat-every-poll noise this dedup was written for.
-    trip_ids = [row["trip_id"] for row in resolved]
-    cur.execute("""
-        SELECT DISTINCT ON (trip_id, station_id) trip_id, station_id,
-               delay_minutes, is_cancelled
-        FROM delay_observations
-        WHERE trip_id = ANY(%s) AND observed_date = %s
-        ORDER BY trip_id, station_id, id DESC
-    """, (trip_ids, date.today()))
-    last_state = {(r[0], r[1]): (r[2], bool(r[3])) for r in cur.fetchall()}
-
-    count = 0
-    skipped = 0
-    cancelled_count = 0
-    for row in resolved:
-        # Keyed on (trip, STATION), not on the trip alone.
-        #
-        # Keying on the trip alone skipped the insert whenever the delay was
-        # unchanged - including when the train had moved on to a completely
-        # different stop. The row that would have recorded "this train reached
-        # the next station, still 4 minutes down" was thrown away as a
-        # duplicate, so Poland held 6.45M observations and exactly ZERO
-        # journeys: 182,682 trip-days, every one of them at 1.0 distinct stops.
-        # That is the whole trajectory signal, and no forecast can be built
-        # without it.
-        #
-        # Germany never had this problem because its dedup already keyed on
-        # (trip_id, stop_sequence), which is why DE is the only country with
-        # usable trajectories today. Genuinely redundant repeats - same train,
-        # same stop, same delay - are still skipped, so this adds at most one
-        # row per stop a train actually calls at.
-        if last_state.get((row["trip_id"], row["station_id"])) == (
-                row["delay_minutes"], row["is_cancelled"]):
-            skipped += 1
-            continue
-        if row["is_cancelled"]:
-            cancelled_count += 1
-            print(f"  {row['route_name']} at {row['station_name']}: CANCELLED ({row['cancellation_kind']})")
-        else:
-            print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
+        # mkuran.pl's first stop_time_update for a trip stays the same predicted
+        # stop for many consecutive polls until the train actually reaches it -
+        # writing a fresh row every 5 min regardless was the dominant driver of
+        # DB growth (confirmed: ~1.5-1.8M PL rows/day, ~193x more than the
+        # distinct (trip_id, delay_minutes) pairs actually observed). Only write
+        # a new row when the delay for a trip has actually changed since its
+        # last recorded observation.
+        # Scoped to TODAY, which the first version of this wasn't - and that was a
+        # real data-integrity bug, not a nuance. 92.8% of PL trip_ids recur across
+        # days (DE 43.2%, both measured), and ~71% of PL rows are exactly 0.0
+        # minutes, so an unscoped "has this trip's delay changed since its last
+        # observation" meant a train that runs punctually every day was recorded
+        # once and then never again - every later day silently vanished. Comparing
+        # within the service day gives each trip at least one row per day while
+        # still collapsing the repeat-every-5-minutes noise this was written for.
+        # Compared as a (delay, cancelled) pair, not delay alone: a trip that gets
+        # cancelled goes from some delay to delay NULL, and a NULL never equals
+        # anything in Python's `==` sense against a float - but a trip already
+        # recorded as cancelled would otherwise re-write an identical row every
+        # 5 minutes for the rest of the day, since NULL == NULL is True here.
+        # Pairing them keeps both transitions (running -> cancelled and cancelled
+        # -> running again) as real, recorded events while still collapsing the
+        # repeat-every-poll noise this dedup was written for.
+        trip_ids = [row["trip_id"] for row in resolved]
         cur.execute("""
-            INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, trip_id, cancellation_kind, platform,
-                 stop_sequence, scheduled_arrival, scheduled_departure, delay_arrival_minutes, delay_departure_minutes)
-            VALUES (%s, CURRENT_DATE, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            row["station_id"], row["delay_minutes"], row["is_cancelled"], row["route_name"],
-            COUNTRY_CODE, row["headsign"], row["lat"], row["lon"], row["position_source"],
-            row["trip_id"], row["cancellation_kind"], row["platform"],
-            row.get("stop_sequence"), row.get("scheduled_arrival"), row.get("scheduled_departure"),
-            row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
-        ))
-        count += 1
-    conn.commit()
-    cur.close()
-    conn.close()
-    print(f"Saved {count} observations ({cancelled_count} cancelled), skipped {skipped} unchanged.")
+            SELECT DISTINCT ON (trip_id, station_id) trip_id, station_id,
+                   delay_minutes, is_cancelled
+            FROM delay_observations
+            WHERE trip_id = ANY(%s) AND observed_date = %s
+            ORDER BY trip_id, station_id, id DESC
+        """, (trip_ids, date.today()))
+        last_state = {(r[0], r[1]): (r[2], bool(r[3])) for r in cur.fetchall()}
+
+        count = 0
+        skipped = 0
+        cancelled_count = 0
+        for row in resolved:
+            # Keyed on (trip, STATION), not on the trip alone.
+            #
+            # Keying on the trip alone skipped the insert whenever the delay was
+            # unchanged - including when the train had moved on to a completely
+            # different stop. The row that would have recorded "this train reached
+            # the next station, still 4 minutes down" was thrown away as a
+            # duplicate, so Poland held 6.45M observations and exactly ZERO
+            # journeys: 182,682 trip-days, every one of them at 1.0 distinct stops.
+            # That is the whole trajectory signal, and no forecast can be built
+            # without it.
+            #
+            # Germany never had this problem because its dedup already keyed on
+            # (trip_id, stop_sequence), which is why DE is the only country with
+            # usable trajectories today. Genuinely redundant repeats - same train,
+            # same stop, same delay - are still skipped, so this adds at most one
+            # row per stop a train actually calls at.
+            if last_state.get((row["trip_id"], row["station_id"])) == (
+                    row["delay_minutes"], row["is_cancelled"]):
+                skipped += 1
+                continue
+            if row["is_cancelled"]:
+                cancelled_count += 1
+                print(f"  {row['route_name']} at {row['station_name']}: CANCELLED ({row['cancellation_kind']})")
+            else:
+                print(f"  {row['route_name']} at {row['station_name']}: {row['delay_minutes']}")
+            cur.execute("""
+                INSERT INTO delay_observations
+                    (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, trip_id, cancellation_kind, platform,
+                     stop_sequence, scheduled_arrival, scheduled_departure, delay_arrival_minutes, delay_departure_minutes)
+                VALUES (%s, CURRENT_DATE, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                row["station_id"], row["delay_minutes"], row["is_cancelled"], row["route_name"],
+                COUNTRY_CODE, row["headsign"], row["lat"], row["lon"], row["position_source"],
+                row["trip_id"], row["cancellation_kind"], row["platform"],
+                row.get("stop_sequence"), row.get("scheduled_arrival"), row.get("scheduled_departure"),
+                row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
+            ))
+            count += 1
+        conn.commit()
+        print(f"Saved {count} observations ({cancelled_count} cancelled), skipped {skipped} unchanged.")
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     poll()

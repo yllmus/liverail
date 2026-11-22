@@ -262,115 +262,116 @@ def parse_at_vehicles(movements):
 
 def poll():
     conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    print("Polling ÖBB...")
-    movements = call_radar()
-    rows = parse_at_vehicles(movements)
-    print(f"Got {len(rows)} vehicles")
+    try:
+        cur = conn.cursor()
+        print("Polling ÖBB...")
+        movements = call_radar()
+        rows = parse_at_vehicles(movements)
+        print(f"Got {len(rows)} vehicles")
 
-    # Dedup, which AT has never had. PL and DE skip an INSERT when a trip's
-    # delay has not changed since the last poll (the fix that took
-    # delay_observations from 54M rows to 15.3M); Austria wrote every train
-    # every five minutes regardless, ~75,600 rows/day. That was affordable
-    # only while 37% of its trains were being silently dropped - now that they
-    # are recorded, unconditional writing would push AT past 185,000/day for
-    # no extra information.
-    #
-    # Keyed on the journey id INSIDE the HAFAS tripId, not the tripId itself.
-    # The full identifier is not stable across polls - it embeds a server
-    # timestamp (#ST#), so the same physical train arrives wearing a different
-    # id every five minutes. Measured: 1,440 rows in fifteen minutes carried
-    # 438 distinct tripIds, one train alone accounting for five of them, and a
-    # dedup keyed on the whole string skipped almost nothing. The #ZI# field
-    # is the journey id and does hold still, which is why hafas_journey_id()
-    # pulls it out. trip_id is no good either: it resolves for barely half of
-    # AT's vehicles, so keying on it
-    # would treat every unresolved train as brand new.
-    for r in rows:
-        r["_zi"] = hafas_journey_id(r.get("live_trip_id"))
-    keys = [(r["_zi"], r.get("stop_name")) for r in rows if r["_zi"]]
-    last_state = {}
-    if keys:
-        cur.execute("""
-            SELECT DISTINCT ON (split_part(o.live_trip_id, '#', 9), s.name)
-                   split_part(o.live_trip_id, '#', 9), s.name,
-                   o.delay_minutes, o.is_cancelled
-            FROM delay_observations o
-            JOIN stations s ON s.id = o.station_id
-            WHERE o.country_code = %s AND o.observed_date = %s
-              AND split_part(o.live_trip_id, '#', 9) = ANY(%s)
-            ORDER BY split_part(o.live_trip_id, '#', 9), s.name, o.id DESC
-        """, (COUNTRY_CODE, date.today(), [k[0] for k in keys]))
-        last_state = {(r[0], r[1]): (r[2], bool(r[3])) for r in cur.fetchall()}
+        # Dedup, which AT has never had. PL and DE skip an INSERT when a trip's
+        # delay has not changed since the last poll (the fix that took
+        # delay_observations from 54M rows to 15.3M); Austria wrote every train
+        # every five minutes regardless, ~75,600 rows/day. That was affordable
+        # only while 37% of its trains were being silently dropped - now that they
+        # are recorded, unconditional writing would push AT past 185,000/day for
+        # no extra information.
+        #
+        # Keyed on the journey id INSIDE the HAFAS tripId, not the tripId itself.
+        # The full identifier is not stable across polls - it embeds a server
+        # timestamp (#ST#), so the same physical train arrives wearing a different
+        # id every five minutes. Measured: 1,440 rows in fifteen minutes carried
+        # 438 distinct tripIds, one train alone accounting for five of them, and a
+        # dedup keyed on the whole string skipped almost nothing. The #ZI# field
+        # is the journey id and does hold still, which is why hafas_journey_id()
+        # pulls it out. trip_id is no good either: it resolves for barely half of
+        # AT's vehicles, so keying on it
+        # would treat every unresolved train as brand new.
+        for r in rows:
+            r["_zi"] = hafas_journey_id(r.get("live_trip_id"))
+        keys = [(r["_zi"], r.get("stop_name")) for r in rows if r["_zi"]]
+        last_state = {}
+        if keys:
+            cur.execute("""
+                SELECT DISTINCT ON (split_part(o.live_trip_id, '#', 9), s.name)
+                       split_part(o.live_trip_id, '#', 9), s.name,
+                       o.delay_minutes, o.is_cancelled
+                FROM delay_observations o
+                JOIN stations s ON s.id = o.station_id
+                WHERE o.country_code = %s AND o.observed_date = %s
+                  AND split_part(o.live_trip_id, '#', 9) = ANY(%s)
+                ORDER BY split_part(o.live_trip_id, '#', 9), s.name, o.id DESC
+            """, (COUNTRY_CODE, date.today(), [k[0] for k in keys]))
+            last_state = {(r[0], r[1]): (r[2], bool(r[3])) for r in cur.fetchall()}
 
-    count = 0
-    resolved_count = 0
-    skipped = 0
-    unresolved_station = 0
-    unknown = 0
-    for row in rows:
-        # A train OBB has published no delay for is kept in the live feed -
-        # parse_at_vehicles emits it, and /live?country=AT reads that parser
-        # directly, so the map now shows all 1,064 moving trains instead of
-        # 653. It is not written to history, though: delay_minutes NULL
-        # contributes nothing to a delay distribution (percentile_cont ignores
-        # NULLs) and there are ~380 of them per poll, which would have tripled
-        # Austria's stored rows to buy no answerable question. A cancellation
-        # is different and always stored - that IS the information.
-        if row["delay_minutes"] is None and not row["is_cancelled"]:
-            unknown += 1
-            continue
-        prev = last_state.get((row.get("_zi"), row.get("stop_name")))
-        if prev is not None and prev == (row["delay_minutes"], row["is_cancelled"]):
-            skipped += 1
-            continue
-        state = "CANCELLED" if row["is_cancelled"] else row["delay_minutes"]
-        print(f"  {row['route_name']} at {row['stop_name']}: {state}")
-        # Real GPS straight off HAFAS's radar (not the schedule-interpolated
-        # estimate PL/DE fall back to) - tagged explicitly so a consumer
-        # never has to guess which kind of position a row holds.
-        position_source = "live" if row["lat"] is not None else None
-        trip_id = resolve_trip_id(cur, row["train_number"], row["stop_name"], row["delay_minutes"], local_now(COUNTRY_CODE))
-        if trip_id is not None:
-            resolved_count += 1
-        # Same candidate list the INSERT below resolves station_id with, so
-        # the stop identity always describes the station the row is written
-        # on - see lookup_stop_identity().
-        candidates = station_name_candidates(row["stop_name"])
-        stop_sequence, sched_arrival, sched_departure = lookup_stop_identity(
-            cur, COUNTRY_CODE, trip_id, candidates)
-        cur.execute("""
-            INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id, trip_id, cancellation_kind, platform,
-                 stop_sequence, scheduled_arrival, scheduled_departure, delay_arrival_minutes, delay_departure_minutes)
-            SELECT s.id, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-            FROM stations s
-            WHERE s.name = ANY(%s) AND s.country_code = %s
-            ORDER BY array_position(%s, s.name)
-            LIMIT 1
-        """, (
-            date.today(), row["delay_minutes"], row["is_cancelled"], row["route_name"], COUNTRY_CODE,
-            row["headsign"], row["lat"], row["lon"], position_source, row["live_trip_id"], trip_id,
-            row["cancellation_kind"], row["platform"],
-            stop_sequence, sched_arrival, sched_departure,
-            row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
-            candidates, COUNTRY_CODE, candidates,
-        ))
-        # Same reasoning as poller.py: this INSERT is a SELECT against
-        # `stations`, so an unmatched name writes nothing while an
-        # unconditional counter still reports it as saved. AT resolves names
-        # through station_name_candidates(), which covers a lot, but the
-        # remaining misses are real and were invisible.
-        if cur.rowcount:
-            count += 1
-        else:
-            unresolved_station += 1
-    conn.commit()
-    cur.close()
-    conn.close()
-    print(f"Saved {count} observations, {resolved_count} with a resolved trip_id, "
-          f"skipped {skipped} unchanged, {unknown} with no delay published, "
-          f"{unresolved_station} dropped for an unknown station.")
+        count = 0
+        resolved_count = 0
+        skipped = 0
+        unresolved_station = 0
+        unknown = 0
+        for row in rows:
+            # A train OBB has published no delay for is kept in the live feed -
+            # parse_at_vehicles emits it, and /live?country=AT reads that parser
+            # directly, so the map now shows all 1,064 moving trains instead of
+            # 653. It is not written to history, though: delay_minutes NULL
+            # contributes nothing to a delay distribution (percentile_cont ignores
+            # NULLs) and there are ~380 of them per poll, which would have tripled
+            # Austria's stored rows to buy no answerable question. A cancellation
+            # is different and always stored - that IS the information.
+            if row["delay_minutes"] is None and not row["is_cancelled"]:
+                unknown += 1
+                continue
+            prev = last_state.get((row.get("_zi"), row.get("stop_name")))
+            if prev is not None and prev == (row["delay_minutes"], row["is_cancelled"]):
+                skipped += 1
+                continue
+            state = "CANCELLED" if row["is_cancelled"] else row["delay_minutes"]
+            print(f"  {row['route_name']} at {row['stop_name']}: {state}")
+            # Real GPS straight off HAFAS's radar (not the schedule-interpolated
+            # estimate PL/DE fall back to) - tagged explicitly so a consumer
+            # never has to guess which kind of position a row holds.
+            position_source = "live" if row["lat"] is not None else None
+            trip_id = resolve_trip_id(cur, row["train_number"], row["stop_name"], row["delay_minutes"], local_now(COUNTRY_CODE))
+            if trip_id is not None:
+                resolved_count += 1
+            # Same candidate list the INSERT below resolves station_id with, so
+            # the stop identity always describes the station the row is written
+            # on - see lookup_stop_identity().
+            candidates = station_name_candidates(row["stop_name"])
+            stop_sequence, sched_arrival, sched_departure = lookup_stop_identity(
+                cur, COUNTRY_CODE, trip_id, candidates)
+            cur.execute("""
+                INSERT INTO delay_observations
+                    (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id, trip_id, cancellation_kind, platform,
+                     stop_sequence, scheduled_arrival, scheduled_departure, delay_arrival_minutes, delay_departure_minutes)
+                SELECT s.id, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                FROM stations s
+                WHERE s.name = ANY(%s) AND s.country_code = %s
+                ORDER BY array_position(%s, s.name)
+                LIMIT 1
+            """, (
+                date.today(), row["delay_minutes"], row["is_cancelled"], row["route_name"], COUNTRY_CODE,
+                row["headsign"], row["lat"], row["lon"], position_source, row["live_trip_id"], trip_id,
+                row["cancellation_kind"], row["platform"],
+                stop_sequence, sched_arrival, sched_departure,
+                row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
+                candidates, COUNTRY_CODE, candidates,
+            ))
+            # Same reasoning as poller.py: this INSERT is a SELECT against
+            # `stations`, so an unmatched name writes nothing while an
+            # unconditional counter still reports it as saved. AT resolves names
+            # through station_name_candidates(), which covers a lot, but the
+            # remaining misses are real and were invisible.
+            if cur.rowcount:
+                count += 1
+            else:
+                unresolved_station += 1
+        conn.commit()
+        print(f"Saved {count} observations, {resolved_count} with a resolved trip_id, "
+              f"skipped {skipped} unchanged, {unknown} with no delay published, "
+              f"{unresolved_station} dropped for an unknown station.")
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     poll()

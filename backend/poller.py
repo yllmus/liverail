@@ -142,68 +142,69 @@ def resolve_trip_id(cur, number, station_name=None, delay_minutes=None, now=None
 
 def poll():
     conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    print("Polling MÁV...")
-    resp = requests.post(GRAPHQL_URL, json={"query": QUERY}, timeout=30)
-    if resp.status_code != 200:
-        print(f"Error: {resp.status_code}")
-        return
-    rows = parse_vehicles(resp.json())
-    print(f"Got {len(rows)} vehicles")
-    count = 0
-    resolved_count = 0
-    unresolved_station = 0
-    for row in rows:
-        state = "CANCELLED" if row["is_cancelled"] else row["delay_minutes"]
-        print(f"  {row['route_name']} at {row['stop_name']}: {state}")
-        # Real GPS straight off the live feed (not the schedule-interpolated
-        # estimate PL/DE fall back to) - tagged explicitly so a consumer
-        # never has to guess which kind of position a row holds.
-        position_source = "live" if row["lat"] is not None else None
-        trip_id = resolve_trip_id(cur, row["train_number"], row["stop_name"], row["delay_minutes"], local_now(COUNTRY_CODE))
-        if trip_id is not None:
-            resolved_count += 1
-        # Which stop of the journey this is, and when it was due. Only
-        # knowable once trip_id resolved - MAV's live feed identifies the stop
-        # by name, not by position. (OTP does publish prevOrCurrentStop.
-        # stopPosition, but that is an OTP pattern index and HU's static
-        # stop_sequence values are sparse - up to 99,990, and only 56 of 2,000
-        # sampled trips number consecutively - so the two are different
-        # numbering schemes and must not be conflated. See
-        # schema/008_stop_identity.sql.)
-        stop_sequence, sched_arrival, sched_departure = lookup_stop_identity(
-            cur, COUNTRY_CODE, trip_id, [row["stop_name"]])
-        cur.execute("""
-            INSERT INTO delay_observations
-                (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id, trip_id, cancellation_kind, platform,
-                 stop_sequence, scheduled_arrival, scheduled_departure, delay_arrival_minutes, delay_departure_minutes)
-            SELECT s.id, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-            FROM stations s
-            WHERE s.name = %s AND s.country_code = %s
-        """, (
-            date.today(), row["delay_minutes"], row["is_cancelled"], row["route_name"], COUNTRY_CODE,
-            row["headsign"], row["lat"], row["lon"], position_source, row["live_trip_id"], trip_id,
-            row["cancellation_kind"], row["platform"],
-            stop_sequence, sched_arrival, sched_departure,
-            row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
-            row["stop_name"], COUNTRY_CODE,
-        ))
-        # cur.rowcount, not an unconditional increment. The INSERT is a
-        # SELECT against `stations`, so an unknown station name inserts NOTHING
-        # and the old count still claimed it as saved. That is how 7.8% of
-        # Hungarian observations - every HEV line, H5 through H9 - were parsed,
-        # discarded and reported as written, for as long as HU has been
-        # running. Counting what the database actually accepted is the only
-        # version of this number worth printing.
-        if cur.rowcount:
-            count += 1
-        else:
-            unresolved_station += 1
-    conn.commit()
-    cur.close()
-    conn.close()
-    print(f"Saved {count} observations, {resolved_count} with a resolved trip_id, "
-          f"{unresolved_station} dropped for an unknown station.")
+    try:
+        cur = conn.cursor()
+        print("Polling MÁV...")
+        resp = requests.post(GRAPHQL_URL, json={"query": QUERY}, timeout=30)
+        if resp.status_code != 200:
+            print(f"Error: {resp.status_code}")
+            return
+        rows = parse_vehicles(resp.json())
+        print(f"Got {len(rows)} vehicles")
+        count = 0
+        resolved_count = 0
+        unresolved_station = 0
+        for row in rows:
+            state = "CANCELLED" if row["is_cancelled"] else row["delay_minutes"]
+            print(f"  {row['route_name']} at {row['stop_name']}: {state}")
+            # Real GPS straight off the live feed (not the schedule-interpolated
+            # estimate PL/DE fall back to) - tagged explicitly so a consumer
+            # never has to guess which kind of position a row holds.
+            position_source = "live" if row["lat"] is not None else None
+            trip_id = resolve_trip_id(cur, row["train_number"], row["stop_name"], row["delay_minutes"], local_now(COUNTRY_CODE))
+            if trip_id is not None:
+                resolved_count += 1
+            # Which stop of the journey this is, and when it was due. Only
+            # knowable once trip_id resolved - MAV's live feed identifies the stop
+            # by name, not by position. (OTP does publish prevOrCurrentStop.
+            # stopPosition, but that is an OTP pattern index and HU's static
+            # stop_sequence values are sparse - up to 99,990, and only 56 of 2,000
+            # sampled trips number consecutively - so the two are different
+            # numbering schemes and must not be conflated. See
+            # schema/008_stop_identity.sql.)
+            stop_sequence, sched_arrival, sched_departure = lookup_stop_identity(
+                cur, COUNTRY_CODE, trip_id, [row["stop_name"]])
+            cur.execute("""
+                INSERT INTO delay_observations
+                    (station_id, observed_date, actual_arrival, delay_minutes, is_cancelled, route_name, country_code, headsign, lat, lon, position_source, live_trip_id, trip_id, cancellation_kind, platform,
+                     stop_sequence, scheduled_arrival, scheduled_departure, delay_arrival_minutes, delay_departure_minutes)
+                SELECT s.id, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                FROM stations s
+                WHERE s.name = %s AND s.country_code = %s
+            """, (
+                date.today(), row["delay_minutes"], row["is_cancelled"], row["route_name"], COUNTRY_CODE,
+                row["headsign"], row["lat"], row["lon"], position_source, row["live_trip_id"], trip_id,
+                row["cancellation_kind"], row["platform"],
+                stop_sequence, sched_arrival, sched_departure,
+                row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
+                row["stop_name"], COUNTRY_CODE,
+            ))
+            # cur.rowcount, not an unconditional increment. The INSERT is a
+            # SELECT against `stations`, so an unknown station name inserts NOTHING
+            # and the old count still claimed it as saved. That is how 7.8% of
+            # Hungarian observations - every HEV line, H5 through H9 - were parsed,
+            # discarded and reported as written, for as long as HU has been
+            # running. Counting what the database actually accepted is the only
+            # version of this number worth printing.
+            if cur.rowcount:
+                count += 1
+            else:
+                unresolved_station += 1
+        conn.commit()
+        print(f"Saved {count} observations, {resolved_count} with a resolved trip_id, "
+              f"{unresolved_station} dropped for an unknown station.")
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     poll()
