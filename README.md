@@ -1,8 +1,10 @@
 # LiveRail
 
+[![tests](https://github.com/yllmus/liverail/actions/workflows/tests.yml/badge.svg)](https://github.com/yllmus/liverail/actions/workflows/tests.yml)
+
 A live train delay tracker for Hungary, Austria, Poland and Germany. It polls each country's real-time feed every five minutes, stores every observation in PostgreSQL, and uses the accumulated history to answer questions the operators' own apps do not: how often is this train late at this stop, and will this connection work.
 
-**Status: archived.** I no longer host or develop it. The reasons are in [Why it stopped](#why-it-stopped).
+**Status: archived.** I no longer host or develop it. The reasons are in [Why it stopped](#why-it-stopped). The commit history starts in August 2026, when I put the working Hungarian version under version control, and ends with the clean-up I did when I archived it.
 
 ## The hard part: four feeds that disagree
 
@@ -96,6 +98,8 @@ Python 3, FastAPI, PostgreSQL (psycopg2), pandas and numpy, LightGBM, a small No
 
 ## Running it
 
+Python 3.12 and PostgreSQL. The API tests need the same database setup; CI runs these steps on every push.
+
 ```bash
 pip install -r requirements.txt
 (cd backend/hafas && npm install)        # Austria only
@@ -105,7 +109,9 @@ sudo -u postgres psql -c "CREATE ROLE trainuser LOGIN PASSWORD '<same password>'
 sudo -u postgres createdb train_delay_db
 sudo -u postgres psql train_delay_db -f schema/schema.sql
 for f in schema/01[0-7]_*.sql; do sudo -u postgres psql train_delay_db -f "$f"; done
+sudo -u postgres psql train_delay_db -f schema/compensation_rules_seed.sql -f schema/partner_links_seed.sql
 sudo -u postgres psql train_delay_db -c "INSERT INTO countries (code, name) VALUES ('HU', 'Hungary')"
+sudo -u postgres psql train_delay_db -c "GRANT ALL ON ALL TABLES IN SCHEMA public TO trainuser; GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO trainuser"
 
 cd backend
 python3 import.py --country HU --gtfs-dir <dir with stops/routes/trips.txt>
@@ -118,9 +124,11 @@ The API does not serve the frontend. In production Nginx served `web/` and proxi
 `schema/schema.sql` is the flattened result of migrations `002` to `009`, so a fresh database applies it first and then migrations `010` to `017`, all of which are safe to re-run. The two data repairs (`007`, `009`) only matter for the original production database. Static feeds, per-country import flags and the production setup are in [docs/data-sources.md](docs/data-sources.md) and [docs/deployment.md](docs/deployment.md).
 
 ```bash
-pytest tests/                      # fast suite, no database needed
-pytest tests/ -m slow              # the whole-country API tests, need a populated database
+pytest                             # works on a fresh clone; database tests skip with the reason
+pytest -m ""                       # also the slow whole-country tests
 ```
+
+Without a database, 183 tests run and the API tests that need one are skipped. With the database built as above, as in CI, those run too, and only the 19 tests that need real observation data skip. See [docs/testing.md](docs/testing.md).
 
 ## Repository layout
 
@@ -139,13 +147,14 @@ pytest tests/ -m slow              # the whole-country API tests, need a populat
 | `deploy/` | systemd units, nginx config, logrotate, retrain and migration scripts |
 | `analysis/` | One-off investigations into what explains a delay |
 | `tests/` | Unit tests and API tests |
+| `.github/workflows/` | CI: builds the schema in PostgreSQL and runs the tests |
 
 ## Documentation
 
 - [Data sources](docs/data-sources.md): what each country publishes, and how each feed is made to fit one schema
 - [Schema](docs/schema.md): tables, relationships, migrations
 - [Delay forecasting](docs/delay-forecasting.md): what the data says about delays, and the models built on it
-- [Testing](docs/testing.md): the fast and slow test split
+- [Testing](docs/testing.md): what runs with and without a database, and what CI runs
 - [Deployment](docs/deployment.md): server setup, scheduling, backups, moving to a new machine
 
 ## Why it stopped
