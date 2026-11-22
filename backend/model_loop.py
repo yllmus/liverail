@@ -54,24 +54,16 @@ MIN_IMPROVEMENT = 0.0015      # absolute Brier, ~5% of a typical 0.03 score
 TIGHT_TOLERANCE = 0.002       # how much worse it may be on tight buffers
 TIGHT_MAX_BUFFER = 10.0       # minutes; "tight" means a change under this
 
-# A SECOND WAY TO EARN PROMOTION, added 2026-08-23 after Poland exposed that
-# the overall metric alone could not see the improvement that mattered.
+# A second way to earn promotion: a decisive win on tight transfers.
 #
-# Measured, not assumed: tight changes are 11.9% of PL's test set and only
-# 56.8% of them succeed, while the other 88% are wide buffers that succeed
-# ~94% of the time. The overall Brier is a weighted average, so an improvement
-# confined to tight transfers is diluted roughly 8x before it reaches that
-# number. PL's challenger cut tight Brier from 0.1234 to 0.1106 - a 10.4% gain
-# on the only rows a rider ever asks about - and scored +0.0011 overall, which
-# the 0.0015 gate rejected.
-#
-# That gate was therefore demanding a ~0.0126 tight improvement without anyone
-# choosing that figure; it fell out of the arithmetic. So a model may now also
-# be promoted for winning decisively where the decisions are, provided it is
-# not meaningfully worse anywhere else. The bar is the same ~5% relative
-# improvement MIN_IMPROVEMENT represents on the overall scale, applied to the
-# tight scale (~0.12), rather than a number picked to let Poland through:
-# DE's champion cleared it independently at 6.9%.
+# Tight changes are a small share of the test set (about 12% for Poland) and
+# fail far more often than wide ones, so an improvement on them is diluted
+# several times over in the overall Brier score. The overall gate alone
+# rejected a Polish model that was about 10% better on tight changes, which are
+# the only ones a rider asks about. So a model may also be promoted for winning
+# on tight changes, as long as it is not meaningfully worse overall. The bar is
+# the same ~5% relative improvement MIN_IMPROVEMENT sets, applied to the
+# tight-change scale.
 TIGHT_MIN_GAIN = 0.006        # absolute Brier on tight transfers only
 OVERALL_TOLERANCE = 0.0005    # how much worse overall a tight win may be
 CAL_TOLERANCE = 0.01          # and it may not become badly miscalibrated

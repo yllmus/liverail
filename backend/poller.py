@@ -39,24 +39,15 @@ def parse_vehicles(data):
         stop = stop_rel.get("stop") or {}
         stop_name = stop.get("name")
         route_name = clean_route_name(trip.get("route", {}).get("longName"), trip.get("tripShortName"))
-        # Split as well as collapsed. A transfer needs the feeder's ARRIVAL
-        # and the connector's DEPARTURE and they differ wherever a train
-        # waits at a stop; OTP publishes both and this was discarding one.
-        # delay_seconds keeps its exact original meaning (including the `or`,
-        # which also treats a literal 0 as absent) so delay_minutes and every
-        # existing caller are untouched.
+        # Keep arrival and departure delays separately: a transfer needs the
+        # feeder's arrival and the connector's departure, and they differ
+        # wherever a train waits. The `or` deliberately treats 0 as missing.
         arrival_delay = prev.get("arrivalDelay")
         departure_delay = prev.get("departureDelay")
         delay_seconds = arrival_delay or departure_delay
-        # OTP's realtimeState enum includes CANCELED, and MAV's endpoint
-        # accepts omitCanceled:false on its departure boards - but a
-        # vehiclePositions query can only describe trains that are physically
-        # running, so a cancelled service is absent rather than flagged, and a
-        # 6,124-stoptime sample of MAV's own board returned zero CANCELED.
-        # Read anyway (it costs one field on a call already being made) so we
-        # record cancellations the day MAV starts publishing them - but HU is
-        # not claimed as having real cancellation coverage. See
-        # schema/005_cancellations_platform.sql.
+        # vehiclePositions only lists trains that are running, so a cancelled
+        # train is usually absent rather than flagged. The field is read anyway
+        # in case MÁV starts publishing it.
         is_cancelled = prev.get("realtimeState") == "CANCELED"
         if not stop_name or (delay_seconds is None and not is_cancelled):
             continue
@@ -68,63 +59,31 @@ def parse_vehicles(data):
             "delay_departure_minutes": None if (is_cancelled or departure_delay is None) else round(departure_delay / 60, 2),
             "is_cancelled": is_cancelled,
             "cancellation_kind": "stop" if is_cancelled else None,
-            # Best-filled platform data of the four countries (33/43 vehicles
-            # in a real sample) - it was on the stop object all along and
-            # simply never requested.
             "platform": stop.get("platformCode"),
-            # Destination text and live coordinates — both come straight off
-            # this same GraphQL response but were being discarded before;
-            # confirmed present on the real endpoint (tripHeadsign, lat/lon)
-            # before wiring them in. Either can legitimately be missing
-            # (some entries don't carry a headsign) so these stay nullable,
-            # unlike stop_name/route_name/delay_minutes which gate inclusion
-            # above.
+            # Either can be missing, so unlike the fields above they do not
+            # gate inclusion.
             "headsign": trip.get("tripHeadsign"),
             "lat": v.get("lat"),
             "lon": v.get("lon"),
-            # OTP's live gtfsId, e.g. "1:32566556" - confirmed (2026-08-02)
-            # this does NOT match trips.gtfs_trip_id for any sampled trip in
-            # our imported static feed (checked directly against the real
-            # endpoint + DB, 0/4 matched, exact and substring). Stored as an
-            # opaque, unresolved identifier for now; it isn't joinable to
-            # `trips`.
+            # OTP's own trip id. It does not exist in the static GTFS, so it is
+            # stored as an opaque id and only used to follow a train between
+            # polls.
             "live_trip_id": trip.get("gtfsId"),
-            # See resolve_trip_id() below - a second, independent identity
-            # path that (unlike live_trip_id/gtfsId) can sometimes actually
-            # join to our static trips table.
             "train_number": extract_train_number(trip.get("tripShortName")),
         })
     return rows
 
 def resolve_trip_id(cur, number, station_name=None, delay_minutes=None, now=None):
-    # MAV's live gtfsId (e.g. "1:33736070") is an OTP-internal identifier -
-    # confirmed directly against the live endpoint + our imported static
-    # feed that it shares no formatting or numbering scheme with
-    # trips.gtfs_trip_id at all (not a staleness issue - the two id spaces
-    # are structurally unrelated), so it can never be string-matched. This
-    # is the alternative: match the train's real public number (from
-    # tripShortName, see extract_train_number) against routes.name, which
-    # the static feed embeds inconsistently - as a prefix ("Sz 5827"), a
-    # suffix ("9609 HELIKON"), or completely bare ("9939") depending on
-    # category - but always as a standalone digit token. Restricted to
-    # route_type='2' (rail) so a train number doesn't collide with a
-    # "Pótló" rail-replacement-BUS route reusing the same number.
+    # OTP's live trip ids share nothing with the static feed's ids, so the join
+    # uses the train's public number instead. The static feed embeds it in
+    # routes.name as a prefix ("Sz 5827"), a suffix ("9609 HELIKON") or bare
+    # ("9939"), always as a standalone run of digits. Rail routes only, so a
+    # rail replacement bus with the same number cannot match.
     #
-    # First pass (2026-08-20, pre-calendar) resolved ~25% (77/314) - a bare
-    # number match, alone, is ambiguous for ~38% of vehicles because most HU
-    # routes are imported one-per-LINE (e.g. "S76" covers every physical
-    # train on the line all day) and MAV's own trip_short_name column is
-    # 0/34,349 filled, so there was nothing to disambiguate by time of day.
-    # Importing stop_times.txt didn't fix that alone: candidates for the same
-    # number turned out to have *identical* scheduled times (they're one
-    # physical service duplicated once per GTFS service_id/calendar
-    # pattern). Importing calendar.txt (service_calendar table) and matching
-    # against "which service runs today", then falling back to nearest
-    # scheduled time at the observed station if still tied
-    # (resolve_ambiguous_trip, trip_resolution.py), raised this to 60.5%.
-    # The remaining ~40% is a real, confirmed structural gap: mostly HÉV
-    # lines (H6/H7/H8/...), a different agency not in MAV's own GTFS feed at
-    # all, plus genuine schedule drift against the one-time static snapshot.
+    # A number alone often matches several trips, so the candidates are
+    # narrowed in trip_resolution.py. Trains that are not in MÁV's static feed
+    # at all, such as the HÉV suburban lines, stay unresolved. See
+    # docs/data-sources.md.
     if not number:
         return None
     cur.execute("""
@@ -134,9 +93,6 @@ def resolve_trip_id(cur, number, station_name=None, delay_minutes=None, now=None
           AND r.name ~ %s
     """, (COUNTRY_CODE, r"(^|[^0-9])" + re.escape(number) + r"([^0-9]|$)"))
     matches = [m[0] for m in cur.fetchall()]
-    # Ambiguous-match narrowing (same-day calendar, then nearest scheduled
-    # time at the observed station) is shared with austria_poller.py - see
-    # trip_resolution.py.
     station_names = [station_name] if station_name else None
     return resolve_ambiguous_trip(cur, COUNTRY_CODE, matches, station_names, delay_minutes, now)
 
@@ -157,21 +113,16 @@ def poll():
         for row in rows:
             state = "CANCELLED" if row["is_cancelled"] else row["delay_minutes"]
             print(f"  {row['route_name']} at {row['stop_name']}: {state}")
-            # Real GPS straight off the live feed (not the schedule-interpolated
-            # estimate PL/DE fall back to) - tagged explicitly so a consumer
-            # never has to guess which kind of position a row holds.
+            # Real GPS position, unlike the interpolated estimate used for
+            # Poland and Germany.
             position_source = "live" if row["lat"] is not None else None
             trip_id = resolve_trip_id(cur, row["train_number"], row["stop_name"], row["delay_minutes"], local_now(COUNTRY_CODE))
             if trip_id is not None:
                 resolved_count += 1
-            # Which stop of the journey this is, and when it was due. Only
-            # knowable once trip_id resolved - MAV's live feed identifies the stop
-            # by name, not by position. (OTP does publish prevOrCurrentStop.
-            # stopPosition, but that is an OTP pattern index and HU's static
-            # stop_sequence values are sparse - up to 99,990, and only 56 of 2,000
-            # sampled trips number consecutively - so the two are different
-            # numbering schemes and must not be conflated. See
-            # schema/008_stop_identity.sql.)
+            # Which stop of the journey this is and when it was due. MÁV names
+            # the stop rather than numbering it, so this needs a resolved
+            # trip_id. OTP's stopPosition is a different numbering from GTFS
+            # stop_sequence and must not be used for it.
             stop_sequence, sched_arrival, sched_departure = lookup_stop_identity(
                 cur, COUNTRY_CODE, trip_id, [row["stop_name"]])
             cur.execute("""
@@ -189,13 +140,9 @@ def poll():
                 row.get("delay_arrival_minutes"), row.get("delay_departure_minutes"),
                 row["stop_name"], COUNTRY_CODE,
             ))
-            # cur.rowcount, not an unconditional increment. The INSERT is a
-            # SELECT against `stations`, so an unknown station name inserts NOTHING
-            # and the old count still claimed it as saved. That is how 7.8% of
-            # Hungarian observations - every HEV line, H5 through H9 - were parsed,
-            # discarded and reported as written, for as long as HU has been
-            # running. Counting what the database actually accepted is the only
-            # version of this number worth printing.
+            # Count rows the database accepted. The INSERT selects from
+            # stations, so an unknown station name writes nothing, and counting
+            # attempts would report those rows as saved.
             if cur.rowcount:
                 count += 1
             else:

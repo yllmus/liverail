@@ -83,14 +83,10 @@ _SUMMARY_CACHE = {}  # (kind, country) -> {"data": ..., "expires": epoch}
 _SUMMARY_TTL = 900  # 15min - all-time reliability barely shifts minute to minute
 _SUMMARY_LOCKS = {}
 
-# The three Rankings/Compare queries are the expensive ones (measured through
-# nginx: PL 27.8s/34.1s, DE 25.4s/23.3s, AT 12.1s/9.2s cold), and a 15min TTL
-# meant any visitor arriving after a quiet quarter-hour paid that in full - the
-# Rankings tab just sat empty while they waited, which is what "Rankings is
-# blank" actually was. These are all-time historical aggregates over millions
-# of rows; they do not meaningfully change within a day, so they get a long
-# TTL and a background thread that refreshes them before it expires. Result: a
-# request should never compute one of these itself.
+# The Rankings and Compare aggregates take 10 to 35 seconds cold, because they
+# scan millions of rows. They are all-time historical figures that barely
+# change within a day, so they get a long TTL and a background thread that
+# refreshes them before it expires. A request should never compute one itself.
 _WARM_TTL = 21600      # 6h
 _WARM_INTERVAL = 18000  # 5h - comfortably inside _WARM_TTL, so no gap opens
 _WARM_KINDS = ("routes", "stations", "routes_list")
@@ -128,24 +124,22 @@ def _warm_summaries():
                     _cached_summary(kind, country, compute, ttl=_WARM_TTL)
                 except Exception as exc:
                     print(f"summary warm {kind}/{country} failed: {exc}")
-            # Each aggregate costs 49-162 s per country, so a failure here must not stop
-            # the other countries or the loop. Search degrades to the last successful
-            # refresh.
+            # Each aggregate takes minutes per country, so one failure must not
+            # stop the other countries or the loop; search keeps the last good
+            # index.
             #
-            # Unlike the summaries above, this cache lives in Postgres and survives a
-            # restart, so it is rebuilt only when stale. Without the freshness check every
-            # `systemctl restart` started minutes of full-table aggregation.
+            # This index lives in Postgres and survives a restart, so it is
+            # rebuilt only when stale. Otherwise every restart would start
+            # minutes of full-table aggregation.
             try:
                 if _search_index_stale(country):
                     refresh_search_index(country)
             except Exception as exc:
                 print(f"search index refresh {country} failed: {exc}")
-            # The delay distributions are percentile aggregates over the whole
-            # archive and expensive (459 s for AT, the smallest country). Guarded on a 24h age
-            # for the same reason search_index is: it lives in Postgres, so a
-            # restart must reuse it rather than spend an hour rebuilding what
-            # is already there. A day-old delay distribution is not meaningfully
-            # worse than a fresh one; an hour of pegged I/O on a single vCPU is.
+            # Delay distributions are percentile aggregates over the whole
+            # archive and the most expensive rebuild of all. Like search_index
+            # they live in Postgres, so a restart reuses them. A day-old
+            # distribution is not meaningfully worse than a fresh one.
             try:
                 if _delay_distribution_stale(country):
                     refresh_delay_distribution(country)
@@ -162,12 +156,8 @@ def _warm_summaries():
         time.sleep(_WARM_INTERVAL)
 
 def _start_warmer():
-    # Not under pytest. Importing this module in a test starts a real
-    # TestClient, which fires this startup hook - and the aggregates behind it
-    # cost 49-162s per country (see above), for all four, on a single vCPU
-    # shared with four pollers. That turned a ~2min suite into one that ran
-    # past 8 minutes and starved the live API while it did. Nothing in the
-    # tests reads the warmed cache; each test computes what it needs.
+    # Not under pytest: the warmer's aggregates take minutes per country and no
+    # test reads the warmed cache. Each test computes what it needs.
     if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("TRAINAPI_NO_WARMER"):
         return
     threading.Thread(target=_warm_summaries, daemon=True).start()
@@ -176,11 +166,8 @@ def _start_warmer():
 # Backs both /search (typo tolerance) and /sitemap.xml (thin-page exclusion)
 # from one table - see schema/006_search_index.sql for why they share it.
 
-# Minimum observations before a station or route gets its own indexable page.
-# Below this there is nothing on the page worth ranking: the SEO template
-# renders an on-time percentage and an average delay, and both are noise (or
-# blank) under a couple of dozen samples. Measured against the real data,
-# this drops 10,245 zero-observation station pages from the sitemap.
+# Minimum observations before a station or route gets an indexable page. Below
+# this the page's on-time share and average delay are noise or blank.
 _SEO_MIN_OBSERVATIONS = 20
 
 def _search_index_stale(country, max_age_hours=20):
@@ -216,12 +203,11 @@ def refresh_search_index(country):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # GROUP BY name, not station id - DE has 15,731 station rows sharing
-        # 8,013 names, and four identical suggestions for "Harras" is a worse
-        # search result than one. See schema/006_search_index.sql. There is no
-        # count fan-out here the way there is for routes below: every
-        # observation has exactly one station_id, so summing across the rows
-        # that share a name is the honest total for that name.
+        # Group by name, not station id: Germany has many station rows per
+        # name, and four identical suggestions for one station is a worse
+        # result than one. Summing across rows that share a name is the true
+        # total, since every observation has exactly one station_id. See
+        # schema/006_search_index.sql.
         cur.execute("""
             SELECT s.name, MIN(s.display_name), COUNT(o.id)
             FROM stations s
@@ -231,15 +217,10 @@ def refresh_search_index(country):
         """, (country,))
         stations = cur.fetchall()
 
-        # Routes are counted WITHOUT joining `routes`, deliberately. Joining
-        # to pick up long_name multiplies the count by the number of route
-        # rows sharing that name - HU has 11,132 route rows for 3,813 distinct
-        # names, and the first version of this reported route S70 with
-        # 28,840,464 observations against a whole-table total of ~15M (the
-        # real figure is 97,441). A wrong count here is not cosmetic: it
-        # feeds both the search ranking and the sitemap's thin-page
-        # threshold. Counts and labels are therefore two independent queries,
-        # merged in Python.
+        # Routes are counted without joining `routes`. Many route rows can
+        # share one name, so the join multiplies every count, and these counts
+        # feed both the search ranking and the sitemap's thin-page threshold.
+        # Counts and labels are two separate queries, merged in Python.
         cur.execute("""
             SELECT route_name, COUNT(*)
             FROM delay_observations
@@ -367,13 +348,11 @@ def _normalise_plan(raw, country, cur):
                 "arrival_delay_min": (leg.get("arrivalDelay") or 0) / 60.0,
                 "realtime": bool(leg.get("realTime")),
             })
-        # OTP inserts zero-length WALK legs between two trains at the SAME
-        # station even when only RAIL is requested - confirmed in a real
-        # Debrecen->Sopron response, where a Budapest-Keleti walk leg of
-        # 11:52->11:52 turned one genuine 38-minute transfer into two phantom
-        # ones (a 0-minute change, and a change whose feeder was the walk).
-        # Transfers and the change count come from transit legs only; the walk
-        # legs stay in `legs` so the itinerary is not silently rewritten.
+        # OTP inserts zero-length WALK legs between two trains at the same
+        # station even when only rail is requested, which would turn one real
+        # transfer into two fake ones. Transfers and the change count come from
+        # transit legs only; the walk legs stay in `legs` so the itinerary is
+        # not rewritten.
         transit = [l for l in legs if l.get("train_number") or l.get("route_name")]
         transfers = []
         for a, b in zip(transit, transit[1:]):
@@ -483,10 +462,10 @@ def _mixture_of(row):
 def _transfer_probability_mixture(feeder, connector, buffer_min, mct_min, n=4000):
     """Monte Carlo over fitted mixtures. None when the feeder has no fit.
 
-    Preferred over the quantile curve wherever both are available: measured on
-    18,227 held-out German transfers, Brier 0.0350 against the quantile
-    model's 0.0403, and without the systematic pessimism that showed in every
-    reliability bin of both countries tested. See transfer_backtest.py.
+    Preferred over the quantile curve wherever both are available. On 18,227
+    held-out German transfers it scored a Brier of 0.0350 against the quantile
+    model's 0.0403, without the quantile model's consistent pessimism. See
+    transfer_backtest.py.
     """
     f = _mixture_of(feeder)
     if f is None:
@@ -559,8 +538,7 @@ def _dist_row_map(row):
 def resolve_station_anywhere(cur, name):
     """Find a station in ANY country, preferring whichever holds real history.
 
-    Cross-border journeys make this necessary and make the obvious approaches
-    wrong, both measured rather than assumed:
+    Cross-border journeys need this, and the obvious approaches fail:
 
       * A foreign terminus appears in several feeds. "Budapest-Keleti" exists
         in AT's, DE's and HU's imports, and only HU's carries its 163,068
@@ -568,8 +546,8 @@ def resolve_station_anywhere(cur, name):
         loses.
       * The nominally correct country is often not the best one. "Salzburg
         Hbf" matches only DE by exact name, yet Salzburg is Austrian and AT
-        holds it as "Salzburg Hauptbahnhof" with 43,160 observations. And AT
-        genuinely holds MORE observations at Muenchen Hbf than DE does
+        holds it as "Salzburg Hauptbahnhof" with 43,160 observations. AT even
+        holds more observations at Muenchen Hbf than DE does
         (74,300 vs 12,026), because OeBB's radar covers international services
         calling there. Depth is a better guide than nationality.
 
@@ -580,25 +558,20 @@ def resolve_station_anywhere(cur, name):
 
     Returns (country, station_id, name, display_name, observations) or None.
     """
-    # HAFAS appends platform groups in two shapes and only one is
-    # parenthesised: "Wien Hbf (Bahnsteige 3-12)" the poller's helper already
-    # strips, but "München Hbf Gl.5-10" it does not - and that one appeared on
-    # the very first cross-border journey tested. Strip the bare form too,
-    # here rather than in station_name_candidates(), which four pollers depend
-    # on and which should not change shape for a planner's benefit.
+    # HAFAS appends platform groups in two forms: "Wien Hbf (Bahnsteige 3-12)",
+    # which station_name_candidates() already strips, and "München Hbf
+    # Gl.5-10", which it does not. The bare form is stripped here rather than
+    # in the shared helper, which the pollers depend on.
     bare = re.sub(r"\s+(Gl\.|Gleis|Bstg\.?|Bahnsteige?)\s*[\d\s,\-–/]*$", "", name).strip()
     candidates = at_station_name_candidates(name)
     if bare and bare != name:
         for extra in at_station_name_candidates(bare):
             if extra not in candidates:
                 candidates.append(extra)
-    # gtfs.de prefixes interchange stations with their urban-rail modes:
-    # Berlin's main station is "S+U Berlin Hauptbahnhof", not "Berlin Hbf",
-    # and 28 DE stations are named this way. Nothing HAFAS returns carries
-    # that prefix, so without adding it here Berlin Hbf resolved to AT's
-    # thin copy (4,365 observations) instead of DE's own (7,030) - or, for a
-    # station only Germany has, to nothing at all. Both directions are
-    # generated: strip the prefix off an incoming name, and add it to one.
+    # gtfs.de prefixes interchange stations with their urban rail modes ("S+U
+    # Berlin Hauptbahnhof"), which HAFAS never does. Generate both directions,
+    # prefix added and removed, so such a station is not matched to another
+    # country's copy or to nothing.
     for c in list(candidates):
         stripped = re.sub(r"^(S\+U|U\+S|S|U)\s+", "", c).strip()
         if stripped and stripped != c and stripped not in candidates:
@@ -664,13 +637,10 @@ def assess_transfer(cur, country, station_name, buffer_min,
                     feeder_route=None, connector_route=None, min_sample=None,
                     resolved=None, when=None):
     """Risk for one transfer, or an explicit refusal with the reason."""
-    # AT's HAFAS names and its own GTFS names disagree on formatting for a
-    # real chunk of stations - "Wörgl Hbf" vs "Wörgl Hauptbahnhof", trailing
-    # " Bahnhof", parenthetical platform qualifiers. Confirmed here rather than
-    # assumed: a Bregenz->Graz plan produced four transfers, three of which
-    # resolved to no station at all under an exact match. The poller already
-    # solves this with station_name_candidates(); the same list is used here so
-    # a transfer is not silently unassessable for a station we do hold.
+    # ÖBB's HAFAS names and its GTFS names are formatted differently ("Wörgl
+    # Hbf" against "Wörgl Hauptbahnhof"), so use the same candidate list as the
+    # poller. Otherwise many transfers at stations we do hold would be
+    # unassessable.
     if resolved is not None:
         country, station_id, _n, station_display = (
             resolved[0], resolved[1], resolved[2], resolved[3])
@@ -703,15 +673,12 @@ def assess_transfer(cur, country, station_name, buffer_min,
                 "reason": ("No delay distribution deep enough for the arriving train at this "
                            "station yet. Stop-level history began on 21 August 2026.")}
 
-    # Three rungs, best first, each falling through to the next rather than
-    # guessing: the promoted model, the fitted mixture, the raw quantile curve.
-    #
-    # The champion goes first because it is the only one of the three that has
-    # been MEASURED against the others on held-out days - DE's beats the
-    # mixture 0.1434 to 0.1540 on tight transfers, and is three times better
-    # calibrated (0.0075 vs 0.0231). It answers only for a country that has a
-    # promoted model and only for stations it actually trained on; everywhere
-    # else it returns None and costs nothing. See transfer_model.py.
+    # Three estimates, best first, each falling through to the next: the
+    # promoted model, the fitted mixture, then the raw quantile curve. The
+    # model goes first because it is the only one tested against the others on
+    # held-out days. It answers only for countries with a promoted model and
+    # stations it trained on, and returns None elsewhere. See
+    # transfer_model.py.
     p, basis_model = None, None
     if buffer_min is not None:
         # Hour and weekday are features, so the model needs the time the
@@ -731,13 +698,10 @@ def assess_transfer(cur, country, station_name, buffer_min,
         basis_model = "quantiles"
     if p is not None:
         # A cancelled feeder misses the connection whatever the buffer, and the
-        # delay distribution knows nothing about that - cancelled rows carry a
-        # NULL delay and are excluded from the percentiles by construction. So
-        # the delay-based probability is conditional on the train running, and
-        # has to be multiplied by the chance that it does.
-        #
-        # Without this the mixture happily returned exactly 1.0 for a
-        # thirty-minute buffer, which is never true of a railway.
+        # delay distribution cannot see that, because cancelled rows have no
+        # delay. The delay-based probability assumes the train runs, so it is
+        # multiplied by the chance that it does. Without this a long buffer
+        # would score exactly 1.0, which is never true of a railway.
         run_rate = 1.0 - float(feeder.get("cancellation_rate") or 0.0)
         p = max(0.0, min(1.0, p * run_rate))
         # And never claim certainty. Disruption this model cannot see -
@@ -762,12 +726,9 @@ def assess_transfer(cur, country, station_name, buffer_min,
                              "feeds), so this is a documented default, not measured data."),
         "probability": round(p, 3) if p is not None else None,
         "label": _risk_label(p),
-        # The stored curve stops at p95, so nothing above that is modelled and
-        # the probability can never read better than 0.95. Said out loud so a
-        # ceiling is not mistaken for a certainty.
-        # Which curve answered. The quantile fallback stops at p95 and cannot
-        # report better than 0.95; the mixture models the tail and has no such
-        # ceiling.
+        # Which estimate answered. The quantile curve stops at p95, so it can
+        # never report better than 0.95, and that ceiling must not be read as
+        # certainty. The mixture models the tail and has no such ceiling.
         "model": basis_model,
         # Only the raw quantile curve stops at p95. The mixture models the
         # tail, and the champion learned it from outcomes.
@@ -1368,13 +1329,9 @@ def get_plan(country: str = "HU", origin: str = "", destination: str = "",
             if cached and time.time() < cached["expires"]:
                 return cached["data"]
             if country in ("PL", "DE"):
-                # Both planned by connection scan over our own imported
-                # timetable, because neither has a planner to borrow: DB's
-                # HAFAS is shut down and mkuran.pl is a data mirror. Germany
-                # was blocked on two things until now - its calendar was never
-                # imported (service_calendar held 0 DE rows, so no service ever
-                # counted as running) and its poller sampled too few stops per
-                # trip to search over. Both fixed.
+                # Both are planned by a connection scan over our own imported
+                # timetable, because neither country has a planner to borrow:
+                # DB's HAFAS is shut down and mkuran.pl only mirrors data.
                 itineraries = _normalise_plan_pl(
                     cur, frm[0], to[0], datetime.strptime(date, "%Y-%m-%d").date(),
                     pl_planner.hms_to_seconds(time_ + ":00"), n, country)
@@ -1461,10 +1418,9 @@ def _delay_distribution_stale(country, max_age_hours=24):
     """Has this country's distribution gone longer than max_age_hours?
 
     Same contract as _search_index_stale: this cache lives in Postgres, so a
-    restart must reuse it. Measured cost of rebuilding one country is ~8
-    minutes for the smallest of the four, so an unguarded rebuild on every
-    restart would be an hour of pegged I/O on a single vCPU shared with four
-    pollers - the exact failure that guard was added to prevent for search.
+    restart must reuse it. Rebuilding even the smallest country takes about
+    eight minutes, so rebuilding all four on every restart would tie up the
+    server's disk for an hour.
     """
     conn = get_conn()
     cur = conn.cursor()
@@ -1652,8 +1608,8 @@ def get_distribution(country: str = "HU", station: str = "", trip_id: int = None
             "mix_w1", "mix_mu1", "mix_sig1", "mix_mu2", "mix_sig2", "mix_shift", "mix_n")
     base.update({"found": True})
     base.update(dict(zip(keys, row)))
-    # AT never publishes arrival delays at all (0/314 measured) - structural,
-    # not a thin sample, and the caller must not read empty as "never late".
+    # Austria never publishes arrival delays, so an empty arrival column there
+    # must not be read as "never late".
     base["arrival_available"] = country != "AT"
     return base
 
@@ -1770,12 +1726,9 @@ def get_stations(country: str = "HU"):
     conn = get_conn()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        # display_name IS NOT NULL excludes confirmed non-rail stops (see
-        # station_names.py's clean_display_name) - name stays the matching key
-        # for /station/{name}/... lookups, display_name is for showing to a
-        # rider. Not called anywhere in the current frontend, so this response
-        # shape is free to change (see /stations/summary below for the
-        # endpoint that isn't).
+        # display_name IS NOT NULL excludes non-rail stops (see
+        # station_names.py). name stays the lookup key for /station/{name}/...
+        # and display_name is the label shown to riders.
         cur.execute("""
             SELECT DISTINCT name, display_name FROM stations
             WHERE country_code = %s AND display_name IS NOT NULL
@@ -1841,12 +1794,9 @@ def _routes_summary_query(country):
             ORDER BY pct_on_time DESC
         """, (country,))
         rows = cur.fetchall()
-        # route_display: friendly corridor/operator name alongside the raw
-        # route_name join key, additive only - same convention as
-        # stations/summary's display_name (never substituted, never reordered
-        # relative to the existing route_name field index.html already keys
-        # click-through off). See _route_display_map for why this is real data
-        # for AT/PL and legitimately absent for DE/HU.
+        # route_display is a friendly name added next to route_name, never
+        # instead of it, because the frontend uses route_name as the lookup
+        # key. See _route_display_map for which countries have one.
         route_mapping = _route_display_map(country)
         out = [dict(r) for r in rows]
         for r in out:
@@ -1993,12 +1943,9 @@ def _stations_summary_query(country):
     conn = get_conn()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        # station_name stays s.name (the live click-through lookup key index.html
-        # passes straight into /station/{name}/stats) - display_name is added
-        # additively for a rider-facing label, never substituted in. The
-        # display_name IS NOT NULL filter is a real, live-facing improvement:
-        # it keeps confirmed non-rail stops (e.g. DE's Bushaltestelle rows) off
-        # this leaderboard if they ever cross the 20-observation threshold.
+        # station_name stays s.name, the key the frontend passes to
+        # /station/{name}/stats; display_name is added for the label. The
+        # display_name filter keeps non-rail stops off the leaderboard.
         cur.execute("""
             SELECT s.name as station_name, s.display_name,
                    COUNT(*) as total,
@@ -2083,12 +2030,11 @@ def _fmt_time(sec):
     m = (sec % 3600) // 60
     return f"{h:02d}:{m:02d}"
 
-# Registry-driven /live dispatch. Each non-HU country provides a zero-arg
-# fetch function that returns rows already shaped for the response; adding a
-# country means writing one small _live_xx() function and one entry in
-# _LIVE_PROVIDERS, not another copy-pasted cache+fetch+reshape block. HU
-# stays a special case outside the registry since get_live_hu() has no
-# cache/TTL (see its own definition below).
+# Registry-driven /live dispatch. Each country except Hungary provides a fetch
+# function returning rows already shaped for the response, plus a cache
+# lifetime. Adding a country is one _live_xx() function and one entry. Hungary
+# stays outside the registry because its fetch is cheap enough to need no
+# cache.
 _LIVE_CACHE = {}  # country_code -> {"data": [...], "expires": epoch}
 
 def _live_result(rows, stop_key):
@@ -2103,12 +2049,10 @@ def _live_result(rows, stop_key):
             "route_name": row["route_name"],
             "train_number": row.get("train_number") or "",
             "headsign": row.get("headsign"),
-            # Whatever identifier this country's feed uses to address one
-            # specific train, passed through opaquely so /train/{country}/{id}
-            # can look the same train up again. Deliberately NOT normalized
-            # into a shared scheme - AT's is a HAFAS composite key, PL/DE's is
-            # a GTFS trip id, and pretending they're interchangeable would
-            # be a mistake.
+            # Whatever id this country's feed uses for one specific train,
+            # passed through unchanged so /train/{country}/{id} can find the
+            # same train again. Deliberately not normalised: Austria's is a
+            # HAFAS composite key and Poland's and Germany's are GTFS trip ids.
             "train_id": row.get("live_trip_id") or row.get("gtfs_trip_id"),
             "current_stop": row[stop_key],
             "delay_minutes": row["delay_minutes"],
@@ -2159,11 +2103,10 @@ def _live_pl():
     return _live_result(rows, "station_name")
 
 def _live_de():
-    # PL/DE's /live is schedule-vs-actual for whatever's currently in the
-    # TripUpdates feed, not a vehicle-position snapshot the way HU/AT's
-    # radar-style calls are - and DE's resolve rate is ~16% of the raw feed
-    # (most of gtfs.de's realtime-free.pb is non-rail traffic outside DE's
-    # rail-only static import, same rail-only scope as HU/AT/PL).
+    # Poland and Germany's /live is schedule against actual for whatever is in
+    # the trip-update feed, not a snapshot of vehicle positions as for Hungary
+    # and Austria. Most of gtfs.de's feed is non-rail traffic, which does not
+    # resolve and is skipped.
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -2174,27 +2117,19 @@ def _live_de():
     return _live_result(rows, "station_name")
 
 _LIVE_PROVIDERS = {
-    # AT's radar() call used to be cheap (~1-2s), which is why 25s was fine.
-    # Raising radar.js's results cap 256 -> 2000 (it was silently truncating
-    # ~90% of the national feed) made the payload ~9x bigger and the cold
-    # call ~13-16s, so a 25s TTL against the frontend's 30s auto-refresh
-    # meant every single refresh tick paid the full cost. 60s, matching DE.
+    # Austria's radar call takes over ten seconds cold now that it requests the
+    # full national feed, so the cache outlives the frontend's 30-second
+    # refresh.
     "AT": (_live_at, 60),
-    # PL/DE's fetch_fn is a fresh GTFS-RT pull + a per-row schedule join
-    # (~30s for PL's ~22k trip updates, confirmed) - not cheap like AT's
-    # radar() call. A 25s TTL (matched almost exactly to the frontend's old
-    # 30s auto-refresh interval) meant this expensive path reran on nearly
-    # every refresh tick. Longer TTL since the underlying data doesn't
-    # actually move faster than our own poller samples it (every 5min).
+    # Poland and Germany each need a fresh feed fetch plus a per-row schedule
+    # join, which is slow. The data changes no faster than the pollers sample
+    # it (every five minutes), so a longer TTL loses nothing.
     "PL": (_live_pl, 90),
     "DE": (_live_de, 60),
 }
-# One lock per non-HU provider so concurrent requests for the same country
-# (board + map fire together on every tab switch and every 30s auto-refresh)
-# don't independently duplicate the same ~30-90s PL/DE resolve - found while
-# investigating the PL map timeout: two callers racing a cold cache each ran
-# the full fetch+resolve concurrently, roughly doubling load on this box's
-# single vCPU instead of one computing while the other waits and reuses it.
+# One lock per provider, so concurrent requests for the same country (the board
+# and the map load together) wait for one fetch instead of each running the
+# slow fetch and join.
 _LIVE_LOCKS = {country: threading.Lock() for country in _LIVE_PROVIDERS}
 
 @app.get("/live")
@@ -2244,20 +2179,17 @@ def _display_map(country):
     return mapping
 
 def _display_stop(mapping, raw, country):
-    # AT is the reason for the fallback: its live HAFAS names disagree with
-    # its own GTFS names for most stations (3/40 matched in real data - the
-    # documented name-matching limitation), so an unmatched name still gets
-    # the same formatting rules applied rather than being shown raw.
+    # Austria is why this falls back: its live HAFAS names rarely match its own
+    # GTFS names, so an unmatched name still gets the same formatting rules
+    # instead of being shown raw.
     if not raw:
         return raw
     return mapping.get(raw) or clean_display_name(raw, country) or raw
 
-# routes.name (short code) -> routes.long_name (friendly corridor/operator
-# name), for the raw AT/PL line codes. Same cache shape/TTL as
-# _display_map. DE's routes.long_name is confirmed 0/1061 filled (gtfs.de's
-# two static feeds simply don't carry it - see schema/004_route_long_name.sql)
-# so this mapping is legitimately empty for DE and every route falls through
-# to raw-code-only, same as before this existed - not a bug.
+# routes.name (a short code) to routes.long_name (a friendly corridor or
+# operator name), for Austria's and Poland's raw line codes. gtfs.de's feeds
+# carry no long names, so Germany's map is empty and its routes show the raw
+# code. See schema/004_route_long_name.sql.
 _ROUTE_DISPLAY_CACHE = {}  # country_code -> {"map": {...}, "expires": epoch}
 
 def _route_display_map(country):
@@ -2268,13 +2200,9 @@ def _route_display_map(country):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # A short code can legitimately belong to more than one gtfs_route_id
-        # (confirmed: 10 PL / 55 AT / 187 DE names each cover multiple route
-        # rows - direction/branch variants sharing one line code). Rather
-        # than guess which is "the" long name, DISTINCT ON picks one
-        # deterministically (lowest id): the raw code stays
-        # authoritative everywhere this is used, the friendly name is best-
-        # effort supplementary context, never a replacement.
+        # One short code can cover several route rows (direction and branch
+        # variants). DISTINCT ON picks one deterministically; the raw code
+        # stays authoritative and the friendly name is only extra context.
         cur.execute("""
             SELECT DISTINCT ON (name) name, long_name FROM routes
             WHERE country_code = %s AND long_name IS NOT NULL
@@ -2330,10 +2258,9 @@ def get_live_board(country: str = "HU", limit: int = 300, q: str = ""):
     mapping = _display_map(country)
     route_mapping = _route_display_map(country)
 
-    # Captured before the `q` filter below narrows `rows` - "total" means the
-    # whole feed, which is what the aggregates are documented to describe. It
-    # used to come from len(delays), which was safe only while every row had a
-    # delay figure; cancelled rows don't, so the two counts have parted ways.
+    # Counted before the `q` filter narrows `rows`, because "total" describes
+    # the whole feed. Cancelled rows have no delay, so this cannot come from
+    # len(delays).
     total_rows = len(rows)
     delays = _live_delays(rows)
     delayed = sum(1 for d in delays if d > 2)
@@ -2542,13 +2469,11 @@ def get_live_hu():
             else:
                 delay_sec_stop = st.get("departureDelay") or 0
                 sched = st.get("scheduledDeparture")
-            # Checked against the raw feed: MÁV reports 0 for *both* arrival and
-            # departure delay at a trip's final stop even when the train is
-            # running an hour late (every intermediate stop carries the real
-            # figure). That's the feed declining to predict the final arrival,
-            # not a prediction of punctuality - so it's reported as unknown
-            # rather than telling a rider on a 52-late train that it arrives on
-            # time, which is the one stop they care most about.
+            # MÁV reports 0 delay at a trip's final stop even when the train is
+            # running an hour late, while every earlier stop carries the real
+            # figure. That is the feed declining to predict, so it is reported
+            # as unknown rather than telling a rider their late train arrives
+            # on time.
             stop_delay_min = round(delay_sec_stop / 60, 1)
             if is_last and stop_delay_min == 0 and (delay_sec or 0) / 60 > 2:
                 stop_delay_min = None
@@ -2647,11 +2572,9 @@ def health():
 # was the 22k-row DB join, which this does for one trip, so there is no cache.
 _JOURNEY_ROUTE_STATS_TTL = 900
 
-# A delay this large is a schedule-version mismatch, not a delay. A few PL
-# trips, international ones especially, are renumbered upstream, so matching
-# sequence to sequence pairs the wrong stops and yields roughly 20-hour
-# "delays" (PLK_LEO_2026_516260411 is 15-31 in the feed and 0-16 in
-# stop_times). They are reported as unknown instead of showing "1191 minutes
+# A delay this large means the feed and our static snapshot number a trip's
+# stops differently (it happens to a few international Polish trains), so the
+# match paired the wrong stops. Report it as unknown instead of "1191 minutes
 # late".
 _MAX_PLAUSIBLE_DELAY_MIN = 720
 
@@ -2930,11 +2853,9 @@ def _journey_de(train_id, mapping):
         # germany_poller.parse_de_vehicles().
         "is_cancelled": all_skipped,
         "cancellation_kind": "trip" if all_skipped else ("stop" if any_skipped else None),
-        # DE is the one country with no stop_times imported, so the journey can
-        # only be as complete as the feed itself - and gtfs.de's TripUpdates
-        # carry only a trip's *remaining* stops (confirmed: a train near the end
-        # of its run reports 2, one just starting reports up to 70). Flagged so
-        # the UI can say "remaining stops" instead of implying a full route.
+        # The journey comes from the feed, and gtfs.de lists only the stops
+        # still ahead of the train. Flagged so the UI says "remaining stops"
+        # instead of implying a full route.
         "journey_scope": "remaining",
     }
 
@@ -2949,15 +2870,12 @@ _JOURNEY_PROVIDERS = {
 # "Is this specific train usually late", not "is this route". It reads
 # delay_observations.trip_id, so it needs no new data source.
 #
-# What each country can answer differs, so the answer comes back with the data
-# (see identity_basis and history_since):
-#   DE and PL  every row has a real trips.id.
-#   HU and AT  only since the train-number resolvers landed (about 48% and 54%).
-#
-# HU's live id is OTP-internal and AT's is a HAFAS composite key. Neither is
-# stable across days or joinable to the schedule, so both are resolved by the
-# train's public number, as their pollers do. Where even that fails,
-# live_trip_id gives same-day continuity only, and the response says so.
+# What each country can answer differs, so the response says how the train was
+# identified (identity_basis and history_since). Poland and Germany have a real
+# trips.id on every row. Hungary's and Austria's live ids are not stable or
+# joinable to the schedule, so both are resolved by the train's public number,
+# as their pollers do; where that fails, live_trip_id gives same-day continuity
+# only, and the response says so.
 
 _HISTORY_MAX_DAYS = 365
 
@@ -3024,14 +2942,11 @@ def get_train_history(country: str, train_id: str, days: int = 30):
         if trip_id is not None:
             where, params = "o.trip_id = %s", [trip_id]
         else:
-            # No static identity: fall back to the raw feed id, which HU/AT
-            # pollers store unresolved. MAV's OTP ids turn out to be far more
-            # stable across days than expected (one sampled id ran as the same
-            # route for 15 consecutive days), so this is genuinely useful -
-            # but it is NOT safe on its own: 931 of 5,328 HU live ids have
-            # carried more than one route_name, i.e. the id gets reused for a
-            # different train. Scoping to the route the live train is actually
-            # running turns a silently-blended history into a correct one.
+            # No static identity, so fall back to the raw feed id the Hungarian
+            # and Austrian pollers store. MÁV's ids are usually stable across
+            # days but are sometimes reused for a different train, so the query
+            # is also scoped to the route this train is running. Without that,
+            # two trains' histories could be silently blended.
             where = "o.live_trip_id = %s AND o.country_code = %s"
             params = [train_id, country]
             if live_route:
@@ -3109,18 +3024,15 @@ def get_train_history(country: str, train_id: str, days: int = 30):
 
 # --- How this train runs at each stop ---
 # Reads idx_delay_obs_trip_stop (schema/008): every observation of one trip at
-# one stop. /history says whether a train is usually late. This says where it
+# one stop. /history says whether a train is usually late; this says where it
 # loses the time, which is what a transfer depends on.
 #
-# Three things are surfaced, not hidden behind an average:
-#   Sample depth. stop_sequence has only been written since 2026-08-21, so each
-#   stop has its own observation and day counts, and `sufficient_sample` marks
-#   those that clear _MIN_STOP_SAMPLE.
-#   AT has no arrival delays. radar() never sets arrivalDelay, so the poller
-#   writes NULL, and `arrival_available` says so, since an empty column would
-#   read as "never late arriving".
-#   No stop identity without a resolved trip. A train that fell back to
-#   live_trip_id has no stop rows, which returns an explicit reason.
+# Three things are reported rather than hidden behind an average: each stop's
+# own observation and day counts, with `sufficient_sample` for those that clear
+# _MIN_STOP_SAMPLE; `arrival_available`, because Austria never publishes
+# arrival delays and an empty column would read as "never late arriving"; and
+# an explicit reason when the trip was never resolved, since then there are no
+# stop rows.
 _MIN_STOP_SAMPLE = 20  # days of history before a per-stop median means anything
 
 @app.get("/train/{country}/{train_id:path}/stops")
@@ -3245,11 +3157,10 @@ def get_train(country: str, train_id: str):
         delay = stops[idx].get("delay_min")
 
     route_name = journey.get("route_name")
-    # Where this train probably ends up, not where it is. Carrying the current
-    # delay forward is the obvious answer and a measurably wrong one - see
-    # project_arrival_delay. None outside Germany, deliberately: the other
-    # three feeds do not observe consecutive stops often enough to derive a
-    # rate, and borrowing Germany's would be a guess dressed as a figure.
+    # Where this train will probably end up, not where it is. Carrying the
+    # current delay forward is predictably wrong (see project_arrival_delay).
+    # Germany only: the other feeds rarely observe consecutive stops, and
+    # borrowing Germany's rates would be a guess.
     remaining = max(0, len(stops) - (idx or 0) - 1)
     projected = project_arrival_delay(country, delay, remaining)
     route_name = journey.get("route_name")
@@ -3626,16 +3537,13 @@ def seo_route_page(request: Request, country: str, name: str):
 
 @app.get("/sitemap.xml")
 def sitemap(request: Request):
-    # Reads search_index, which carries a per-name observation count, so this
-    # avoids the whole-table scan and gets the thin-page filter from the same rows.
+    # Reads search_index, which already has an observation count per name, so
+    # the sitemap avoids a whole-table scan and gets the thin-page filter from
+    # the same rows.
     #
-    # Thin pages are excluded: below _SEO_MIN_OBSERVATIONS a page has no statistic
-    # worth reading. Before this filter, 10,245 of 21,168 submitted station pages had
-    # zero observations. Thousands of near-identical empty pages is the
-    # doorway-page pattern search engines demote a whole domain for.
-    #
-    # The pages are not removed or 404'd, and say plainly that data is thin. They
-    # are just not submitted for indexing.
+    # Pages below _SEO_MIN_OBSERVATIONS are left out: thousands of near-empty
+    # pages is the pattern search engines demote a whole site for. They still
+    # exist and say plainly that data is thin; they are just not submitted.
     base = _base_url(request)
     conn = get_conn()
     try:

@@ -1,40 +1,24 @@
 """Re-import every country's static GTFS, and merge the stations it splits.
 
-WHY THIS EXISTS. Static feeds drift away from the live ones, silently, and it
-has cost this project real coverage three times:
+Static feeds drift away from the live ones without any error. When gtfs.de
+reissued its stop ids, Germany's resolution collapsed for days, and Poland ran
+with a large share of trips unrecorded for weeks. monitor.py detects drift;
+this job prevents it by re-importing every month.
 
-  * 2026-08-08..19  Germany lost 99.7% of its observations for twelve days.
-    The poller logged "Resolved 6/5724" every five minutes with no error and
-    no exception. It recovered only when someone happened to re-import.
-  * 2026-08-22      Germany again: gtfs.de rotated essentially every regional
-    stop_id, 362 of 16,315 surviving. Resolution fell to 0.5%.
-  * Poland          ran at 70.9% resolution for about three weeks - never
-    alerting, because its floor is 50% - while 29% of its trains went
-    unrecorded. Every one of the 1,912 missing trips was in the current feed.
+The hard part is the merge, not the download. `stations` is unique on
+(country_code, gtfs_stop_id), so a feed that reissues ids makes every station
+look new and the import inserts a second row instead of updating the first.
+Re-importing without merging would split the station table every month, so
+the merge is part of this job.
 
-monitor.py now DETECTS this. Nothing PREVENTS it. This does.
+For each duplicate group it keeps the row with more observations (moving the
+smaller set is cheaper and keeps the busier station page continuous) and
+adopts the gtfs_stop_id the current feed publishes, since that is the id the
+poller will look up next.
 
-THE HARD PART IS NOT THE DOWNLOAD. Re-importing is itself what splits the
-station table: `stations` is keyed UNIQUE (country_code, gtfs_stop_id), and a
-feed that reissues ids presents every station as a new one, so the import
-inserts a second row rather than updating the first. That is what
-schema/007 and schema/009 were both written to repair by hand. A monthly job
-that re-imports without merging would create that damage twelve times a year
-instead of fixing anything, so the merge is part of this, not a follow-up.
-
-MERGE DIRECTION IS DERIVED, NEVER ASSUMED. schema/007 kept the old row
-because it held every stop_times row; schema/009 could not use that rule
-because by then both sides held stop_times, and fell back to history. Both
-decisions were made by measuring first. So this measures too: for each
-duplicate group it keeps whichever row carries more observations - moving the
-smaller set is both cheaper and keeps the busier station page continuous -
-and then adopts the gtfs_stop_id the CURRENT feed publishes, because that is
-the id the poller will look up tomorrow.
-
-SAFETY. Nothing is deleted until its children are moved, and the set of tables
-holding children is read from pg_constraint rather than hardcoded, so a table
-added later stops the merge with a message instead of breaking it mid-run. Dry
-run by default.
+Nothing is deleted until its dependent rows are moved, and the dependent
+tables are read from pg_constraint, so a table added later stops the merge
+with a message instead of breaking it halfway. Dry run by default.
 
     python3 refresh_static_feeds.py --country PL            # report only
     python3 refresh_static_feeds.py --country PL --write
@@ -56,29 +40,24 @@ WORK = os.path.expanduser("~/gtfs_refresh")
 # merge_stations. Three rounds of re-imports produced exactly one triple.
 MAX_GROUP_SIZE = 6
 
-# Tables holding a station_id that a merge must REPOINT at the surviving row,
-# and tables whose station_id rows are DERIVED and should simply be dropped.
+# Tables whose station_id a merge must repoint at the surviving row, and tables
+# whose rows are derived and can simply be dropped.
 #
-# These are not the whole list, and deliberately so: merge_stations asks
-# Postgres which tables actually reference stations and refuses to run if it
-# meets one that is in neither set. The first version hardcoded two tables and
-# broke the moment schema/012 added delay_distribution ten days later - a
-# foreign key violation mid-merge, after the first few groups had already been
-# rewritten. Discovering the dependents means the next table added gets a clear
-# refusal instead of a partial merge.
+# merge_stations reads the tables that actually reference stations from the
+# Postgres catalog and refuses to run if one is in neither set, so a table
+# added later gets a clear refusal instead of a merge that fails halfway
+# through.
 REPOINT_TABLES = {"stop_times", "delay_observations"}
-# delay_distribution is recomputed wholesale per country by
-# api.refresh_delay_distribution, and the warmer rebuilds it once it is a day
-# stale. Repointing it would merge two stations' percentiles by concatenation,
-# which is not how a percentile works; dropping the country's rows lets them be
-# recomputed from the merged history instead.
+# delay_distribution is rebuilt per country by api.refresh_delay_distribution.
+# Merging two stations' rows would concatenate percentiles, which is
+# meaningless; dropping them lets the next rebuild compute them from the merged
+# history.
 DERIVED_TABLES = {"delay_distribution"}
 
-# Each entry: the zip to fetch, the directory to import from, and the extra
-# import.py flags that country needs. The prefixes matter enormously for
-# Germany: it is assembled from two zips that number routes AND services
-# independently, and 861 service_ids collide between them with different week
-# patterns (see import.py --service-id-prefix).
+# Each entry: the zip to fetch, the directory to import into, and that
+# country's extra import.py flags. Germany is assembled from two zips that
+# number routes and services independently, so the prefixes keep their ids
+# apart (see import.py --service-id-prefix).
 FEEDS = {
     "AT": [dict(url="https://static.web.oebb.at/open-data/soll-fahrplan-gtfs/GTFS_Fahrplan_2026.zip",
                 dest="gtfs_at", flags=["--with-stop-times"])],
@@ -90,9 +69,8 @@ FEEDS = {
            dict(url="https://download.gtfs.de/germany/rv_free/latest.zip",
                 dest="gtfs_de_rv", flags=["--route-id-prefix", "rv_",
                                           "--service-id-prefix", "rv_", "--with-stop-times"])],
-    # HU has no published static URL in this project's history - the feed was
-    # placed on disk by hand. Left out rather than guessed at; its directory is
-    # still merged below if someone refreshes it.
+    # Hungary's static feed has no stable download URL, so it is refreshed by
+    # hand. Its directory is still merged below if present.
 }
 
 WANTED = ("stops.txt", "routes.txt", "trips.txt", "stop_times.txt",
@@ -139,14 +117,9 @@ def merge_stations(country, write=False):
     conn = connect()
     cur = conn.cursor()
     try:
-        # N-way, not pairs. The first version of this refused any group with
-        # three or more rows, on the theory that a triple meant something had
-        # gone wrong. Run against real data after three rounds of re-imports it
-        # found 7,578 clean pairs and exactly ONE triple - "Weida Mitte", with
-        # three observations between its rows - and refused all 7,578 because
-        # of it. Merging N rows is the same operation iterated, so it does that
-        # instead, and keeps a ceiling only as a tripwire for genuine
-        # corruption rather than for ordinary feed churn.
+        # Merge groups of any size, not only pairs: merging N rows is the same
+        # operation repeated. The size ceiling only guards against genuine
+        # corruption, not ordinary feed churn.
         cur.execute("""
             SELECT DISTINCT c.conrelid::regclass::text
             FROM pg_constraint c

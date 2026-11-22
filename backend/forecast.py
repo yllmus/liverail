@@ -77,17 +77,15 @@ def band_of(delay):
 def load_observations(cur, country, days, max_rows=1_400_000):
     """Every usable observation, with a per-train identity and a real clock.
 
-    IDENTITY DIFFERS BY COUNTRY, for reasons this project has already
-    established rather than by preference:
-      DE, PL  trips.id - a real schedule identity, 100% populated
-      HU      route_name - which the 2026-08-02 fix made a per-train-number
-              identity, and which reaches 21 days where trip_id reaches 4
-      AT      trip_id, though its resolution is still ~28%
+    The train identity differs by country:
+      DE, PL  trips.id, a real schedule identity on every row
+      HU      route_name, which holds one train number per route and covers
+              far more history than HU's trip_id
+      AT      trip_id, which resolves for only part of the archive
 
-    ORDERING is by actual_arrival, the poll timestamp, which is populated for
-    100% of the archive. stop_sequence was only stamped from 2026-08-21 and
-    using it as the ordering key would throw away 85% of the history; where it
-    IS recoverable (a stop_times join) it is used for the horizon instead.
+    Rows are ordered by actual_arrival, the poll timestamp, which every row
+    has. stop_sequence is missing from older rows, so it is used only for the
+    forecast horizon, where a stop_times join can recover it.
     """
     ident = "d.route_name" if country == "HU" else "d.trip_id::text"
 
@@ -139,20 +137,16 @@ def load_observations(cur, country, days, max_rows=1_400_000):
 def split_days(rows, train_frac=0.6, calib_frac=0.75):
     """Chronological cut points chosen by SAMPLE MASS, not by counting days.
 
-    Two distinct failures forced this, both found by running:
+    Two failure modes rule out simpler splits:
 
-    1. Germany lost 99.7% of its observations for twelve days (2026-08-08..19).
-       Splitting on the day INDEX put the whole calibration window inside that
-       dead zone and produced zero calibration rows.
-    2. Splitting on mass alone then failed the opposite way: Germany's recent
-       days are so much larger than its older ones that 60% of the mass is not
-       reached until the FINAL day, so both cut points landed on the same date
-       and the calibration set was empty again.
+    1. Germany has a twelve-day stretch with almost no observations. Cutting
+       by day index can put the whole calibration window inside it.
+    2. Cutting by mass alone can put both cut points on the same date, because
+       Germany's recent days hold far more rows than its older ones.
 
-    An empty calibration set is not a cosmetic problem - it silently voids the
-    conformal coverage guarantee, which is the one output here that comes with
-    a promise. So the cuts are chosen by mass and then forced to be distinct
-    days with rows on both sides.
+    Either one leaves the calibration set empty, which silently voids the
+    conformal coverage guarantee. So the cuts are chosen by mass and then
+    forced onto distinct days with rows on both sides.
     """
     per_day = defaultdict(int)
     for r in rows:
@@ -546,7 +540,8 @@ def run(country="DE", days=21, max_horizon=8, seed=0, rounds=300):
                     num_boost_round=rounds)
     pred = reg.predict(S2te)
 
-    # one-level control, so the two-level claim is measured and not assumed
+    # A one-level model on the same data, so the two-level design has to earn
+    # its place.
     reg1 = lgb.train({**common, "objective": "regression_l1"},
                      lgb.Dataset(Xtr, label=ytr, feature_name=BASE_FEATURES),
                      num_boost_round=rounds)

@@ -135,12 +135,10 @@ def scan(connections, origin_id, destination_id, depart_after_sec):
     Pure: takes tuples, returns tuples, touches nothing else. `connections`
     must be sorted by departure time, which load_connections guarantees.
     """
-    # Arrival time AND change count, not arrival alone. Plain CSA minimises
-    # arrival only, so on a tie it keeps whatever it found first - which
-    # produced a real Warszawa->Krakow result that rode one stop for three
-    # minutes, waited 42, then boarded the express that had been callable at
-    # the origin all along. Same arrival, one pointless change. Ties now go to
-    # the itinerary with fewer changes.
+    # Compare arrival time and number of changes, not arrival alone. Plain CSA
+    # keeps whichever equal-arrival route it found first, which can add a
+    # pointless change (one stop on a local train, then the express that was
+    # available from the origin). Ties go to fewer changes.
     earliest = {origin_id: (depart_after_sec, 0)}
     came_from = {}
     reached_trips = {}
@@ -175,14 +173,12 @@ def scan(connections, origin_id, destination_id, depart_after_sec):
                 best_arrival = arr
     if destination_id not in came_from:
         return None
-    # Reconstruction has to walk back along a TRIP, not station by station.
-    # came_from holds one connection per station, and a station the train
-    # merely passed through may have been reached earlier by something else -
-    # which produced a real Warszawa->Krakow chain containing a three-minute
-    # hop on a different train, because the express's intermediate stop had
-    # been reached sooner by that hop even though we never got off there.
-    # So: take the connection into the destination, then slide back along its
-    # own trip to the earliest stop where boarding was actually possible.
+    # Reconstruct by walking back along a trip, not station by station.
+    # came_from holds one connection per station, and a station the train only
+    # passed through may have been reached earlier by another train, which
+    # would splice that train into the itinerary. So take the connection into
+    # the destination, then slide back along its own trip to the earliest stop
+    # where boarding was possible.
     by_trip = {}
     for c in connections:
         by_trip.setdefault(c[4], []).append(c)

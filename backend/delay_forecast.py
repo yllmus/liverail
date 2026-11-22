@@ -326,11 +326,10 @@ def run(country="DE", days=21, max_horizon=8, seed=0, quiet=False):
         return {"error": f"{country}: only {len(rows)} samples"}
 
     day_list = sorted({r["day"] for r in rows})
-    # Three days is the floor, not a comfortable number. stop_sequence has only
-    # existed since 2026-08-21, so a trajectory dataset cannot yet be deeper
-    # than that - and a 2-day train / 1-day test split cannot distinguish a
-    # real pattern from one Tuesday. Results below seven days are reported as
-    # PRELIMINARY and are not used to promote anything.
+    # Three days is the minimum, not a comfortable amount: a 2-day train and
+    # 1-day test split cannot tell a real pattern from one unusual Tuesday.
+    # Results from fewer than seven days are reported as preliminary and never
+    # used to promote anything.
     if len(day_list) < 3:
         return {"error": f"{country}: only {len(day_list)} distinct days"}
     cut = day_list[max(1, int(len(day_list) * 0.7))]

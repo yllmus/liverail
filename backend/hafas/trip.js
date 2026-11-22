@@ -1,17 +1,13 @@
-// Oneshot script: fetch ONE ÖBB trip's full journey by its HAFAS trip id and
-// print it as JSON. Same design as radar.js (oneshot subprocess, never a
-// persistent server — the box is memory-constrained), and invoked the same
-// way, from api.py's /train/AT/{id} branch.
+// One-shot script: fetch one ÖBB trip's full journey by its HAFAS trip id and
+// print it as JSON, for /train/AT/{id}. Same design as radar.js.
 //
-// Why this exists separately from radar.js: radar() returns only
-// `nextStopovers`, which in practice is the next ~4 stops (it is bounded by
-// the radar call's own `duration` window), not the whole journey. trip()
-// returns every stopover from origin to destination with both planned and
-// live times — the actual per-stop timeline a train tracker needs.
+// radar() only returns the next few stops of each train. trip() returns every
+// stop from origin to destination with planned and live times, which is what a
+// train tracker needs.
 //
 // Usage: node trip.js '<tripId>' '<lineName>'
-// lineName is required by hafas-client's oebb profile for trip(); it comes
-// straight from the same radar movement the tripId did (movement.line.name).
+// hafas-client's ÖBB profile needs lineName for trip(); it comes from the same
+// radar movement as the tripId (movement.line.name).
 import { createClient } from 'hafas-client';
 import { profile as oebbProfile } from 'hafas-client/p/oebb/index.js';
 

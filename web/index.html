@@ -698,10 +698,9 @@ function routeLabel(name,display){
 function qs(params){return Object.keys(params).filter(function(k){return params[k]!==undefined&&params[k]!==null&&params[k]!=='';}).map(function(k){return k+'='+encodeURIComponent(params[k]);}).join('&');}
 function api(path,params){
   var url=API+path+(params?('?'+qs(params)):'');
-  // PL/DE's /live resolve (fresh GTFS-RT fetch + per-row schedule join) can
-  // legitimately take 30+ real seconds - confirmed 36s for PL under load.
-  // A generous timeout so board/map requests don't get aborted mid-flight
-  // on a slow-but-working query, not a tight one that fights the backend.
+  // Poland's and Germany's /live does a fresh feed fetch and a per-row
+  // schedule join, which can take over 30 seconds cold, so the timeout is
+  // generous rather than aborting a slow but working request.
   var ctrl=('AbortController' in window)?new AbortController():null;
   var timer=ctrl?setTimeout(function(){ctrl.abort();},45000):null;
   return fetch(url,ctrl?{signal:ctrl.signal}:{}).then(function(r){
@@ -1057,11 +1056,9 @@ function renderPositions(rows){
 /* ---------- rankings ---------- */
 var rankState={station:{sort:'pct_on_time',dir:-1,data:[]},route:{sort:'pct_on_time',dir:-1,data:[]}};
 function rankLoading(kind,label){
-  // These aggregate millions of rows. The API keeps them warm in the
-  // background so this is normally instant, but on a cold cache it can take
-  // ~30s - and an empty table with no message is indistinguishable from a
-  // broken one, which is exactly how this got reported as "Rankings is just
-  // blank". Always say something.
+  // These aggregate millions of rows. The API keeps them warm, but on a cold
+  // cache they can take about 30 seconds, and an empty table with no message
+  // looks broken. Always say something.
   document.getElementById(kind+'RankCount').textContent='';
   document.getElementById(kind+'RankTbl').innerHTML=
     '<thead></thead><tbody><tr><td class="rank-loading"><span class="spinner"></span>Loading '+label+
@@ -1632,13 +1629,11 @@ function wireTrainSearch(inputId,popId){
     if(!term){pop.classList.remove('open');pop.innerHTML='';return;}
     var mine=++seq,names=[],haveNames=false,trains=[],haveTrains=false,painted=false;
     render([],'Searching…');
-    // Two independent lookups - running trains (/live/board) and names
-    // (/search). Both are normally fast (the board is warm-cached at ~20ms),
-    // so the list waits for BOTH before it first paints. Painting each as it
-    // arrived meant the second one prepended rows underneath the pointer and
-    // moved the row the rider was about to click - a mis-click, on a picker
-    // whose whole job is picking the right train. A 600ms grace period caps
-    // how long one slow source can hold up the other.
+    // Two independent lookups: running trains (/live/board) and names
+    // (/search). The list waits for both before it first paints, because
+    // painting each as it arrived inserted rows under the pointer and moved
+    // the row the rider was about to click. A 600ms grace period caps how long
+    // one slow source can hold up the other.
     function paint(){
       if(mine!==seq)return;
       if(!haveTrains||!haveNames){
@@ -1745,10 +1740,10 @@ function renderTrain(d){
   loadSimpleActions(state.country,'affiliate_booking');
   if(d.delay_minutes!=null&&d.delay_minutes>0)checkSimpleCompensation(d.delay_minutes);
 }
-// Monday-first, because the history query groups by ISODOW (1=Mon). Named
-// distinctly from the heatmap's own DOW below, which is Sunday-first to match
-// Postgres's EXTRACT(DOW) - two `var DOW` declarations in one scope silently
-// collided and mislabelled every weekday on this panel.
+// Monday-first, because the history query groups by ISODOW (1 = Monday). Named
+// differently from the heatmap's DOW below, which is Sunday-first to match
+// Postgres's EXTRACT(DOW); two `var DOW` declarations in one scope would
+// silently collide.
 var ISO_DOW=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 function loadTrainHistory(d){
   var el=document.getElementById('trainHistory');

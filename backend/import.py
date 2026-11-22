@@ -110,32 +110,21 @@ if not cur.fetchone():
 
 print(f"Importing stops for {country}...")
 stops = pd.read_csv(f"{gtfs_dir}/stops.txt", dtype=str)
-# Child stop_id -> parent (top-level) stop_id, built from the raw file
-# before filtering below. Needed by --with-stop-times: confirmed against
-# DE's static stop_times.txt that it references only platform-level child
-# stop_ids (667/667 in a sample), never the top-level ids `stations` keeps
-# - the same mismatch germany_poller.py's load_parent_map() already works
-# around for the *live* feed, but the *static* import path never got the
-# equivalent fix until now. Harmless where it isn't needed (HU doesn't use
-# --with-stop-times; PL's own stop_times mostly references top-level ids
-# directly, so this dict mostly stays unused for PL rows) and strictly
-# improves PL's existing ~5% unresolved rate for the child ids it does hit.
+# Child stop_id to top-level stop_id, built before the filter below. Some
+# feeds' stop_times.txt (Germany's entirely) reference only platform-level
+# child stops, never the top-level ids kept in `stations`, so --with-stop-times
+# translates them.
 parent_of = {}
 if "parent_station" in stops.columns:
     for _, row in stops.iterrows():
         parent = row.get("parent_station")
         if isinstance(parent, str) and parent.strip():
             parent_of[row["stop_id"]] = parent.strip()
-    # A row with a parent_station is a child (platform/entrance/node) of
-    # another row in this same file — importing it too would duplicate a
-    # single delay event across every platform of a station. Import only
-    # the top-level rows (no parent_station), regardless of what
-    # location_type value the feed happens to use for them: MAV's feed
-    # never sets parent_station at all (nothing filtered, same as before);
-    # OBB's is dominated by location_type=1 parents; Poland's is dominated
-    # by *unparented* location_type=0 halts with only a few location_type=1
-    # hub stations — location_type alone isn't a reliable signal across
-    # feeds, but "does this row have a parent" is, by GTFS spec design.
+    # A row with a parent_station is a platform or entrance of another row, and
+    # importing it would duplicate every station once per platform. Keep only
+    # rows without a parent. location_type is not a reliable signal across
+    # feeds (Poland's halts are unparented location_type=0 rows), but having a
+    # parent is, by GTFS design.
     stops = stops[stops["parent_station"].isna() | (stops["parent_station"].str.strip() == "")]
 for _, row in stops.iterrows():
     cur.execute("""
@@ -148,16 +137,9 @@ conn.commit()
 print(f"Imported {len(stops)} stops.")
 
 def _clean(v):
-    # pandas represents a blank CSV field as float NaN, not "", and NaN is
-    # truthy in Python — `v or fallback` never falls through, so a blank
-    # route_short_name silently wins over a real route_long_name.
-    #
-    # Second, separate bug fixed here: this used to check v.strip() for
-    # truthiness but return the *unstripped* v, so a non-blank value with
-    # stray whitespace (e.g. "[Pótló 41011 ]") passed through untouched —
-    # 4248/11132 (38%) of HU routes.name carried a trailing space because
-    # of this. Returning v.strip() fixes it; re-running import.py backfills
-    # existing rows since routes/trips upsert with ON CONFLICT DO UPDATE.
+    # pandas reads a blank CSV field as NaN, which is truthy, so `v or
+    # fallback` would never fall through. Values are also stripped: some feeds
+    # pad names with spaces ("[Pótló 41011 ]").
     return v.strip() if isinstance(v, str) and v.strip() else None
 
 def _prefixed_service(v):
@@ -165,12 +147,8 @@ def _prefixed_service(v):
     return None if v is None else args.service_id_prefix + v
 
 
-# agency.txt is optional per feed (not every extracted gtfs_dir has one —
-# AT's/PL's don't, since only stops/routes/trips were pulled from their
-# zips) and agency is a route-level GTFS concept, not a trip-level one, so
-# this becomes routes.agency_name rather than anything on trips. Missing
-# file or missing agency_id just leaves agency_name NULL, same graceful-skip
-# convention as everything else here.
+# agency.txt is optional, and agency belongs to a route in GTFS, so it becomes
+# routes.agency_name. Missing data leaves it NULL.
 agency_path = f"{gtfs_dir}/agency.txt"
 agency_names = {}
 if os.path.exists(agency_path):
@@ -186,13 +164,10 @@ for _, row in routes.iterrows():
     short_name = _clean(row.get("route_short_name"))
     long_name = _clean(row.get("route_long_name"))
     name = short_name or long_name
-    # Only keep long_name as a separate friendly-name field when it's real
-    # extra information - i.e. short_name won the `name` slot above. When
-    # short_name was blank and long_name became `name` itself, storing it
-    # again here would just be the same string twice (see
-    # 004_route_long_name.sql for why this column exists at all: AT/PL's
-    # route_long_name is a real "origin - destination" corridor description
-    # that route_short_name-preferring `name` was discarding entirely).
+    # Keep long_name separately only when it adds information, i.e. when
+    # short_name became `name`. For Austria and Poland it is an "origin -
+    # destination" description that would otherwise be lost. See
+    # schema/004_route_long_name.sql.
     friendly = long_name if (short_name and long_name and long_name != short_name) else None
     agency_name = agency_names.get(row.get("agency_id"))
     cur.execute("""
@@ -249,22 +224,15 @@ if os.path.exists(_calendar_path):
 else:
     print(f"No calendar.txt in {gtfs_dir}, skipping calendar import.")
 
-# calendar_dates.txt: individual dates a service is added to or removed from
-# its weekly pattern. GTFS treats the two as complementary, not alternative,
-# and both are needed to answer "does this service run on date D":
+# calendar_dates.txt adds or removes single dates from a service's weekly
+# pattern. A service runs on date D if a calendar row matches D's weekday
+# within its validity window, or an exception adds D, and no exception removes
+# D.
 #
-#   a calendar row matching D's weekday and inside its validity window,
-#   OR  an exception row for D with added = true,
-#   AND NOT an exception row for D with added = false
-#
-# It is not optional decoration. Poland's feed ships NO calendar.txt at all -
-# every one of its 7,557 service days is an exception_type=1 row here - so
-# without this, PL's journey planner found no services running on any date and
-# returned nothing for every query. Germany uses it the other way round, as
-# holiday and engineering exceptions layered on real weekly patterns.
-#
-# exception_type is 1 = added, 2 = removed; stored as a boolean because there
-# are only ever those two. See schema/013_service_dates.sql.
+# Poland's feed has no calendar.txt at all and defines every service day here,
+# so without this table nothing would run on any date. Germany uses it for
+# holiday and engineering exceptions. exception_type 1 = added, 2 = removed,
+# stored as a boolean. See schema/013_service_dates.sql.
 _caldates_path = f"{gtfs_dir}/calendar_dates.txt"
 if os.path.exists(_caldates_path):
     print(f"Importing calendar exceptions for {country}...")

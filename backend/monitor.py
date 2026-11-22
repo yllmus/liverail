@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 """Silent-break monitoring for the four pollers.
 
-A process-alive check is close to worthless here. Every serious failure this
-project has actually had looked *healthy* from the outside:
+Checking that a process is alive is not enough here. The serious failures
+in this project all looked healthy from the outside:
 
-  - DE's first real run resolved 0/30539 rows. The poller ran, the feed
-    returned 200, and nothing reached the database, because the feed's
-    stop_ids were platform-level children our stations table excludes.
-  - AT silently lost ~90% of its feed for months to an unnoticed
-    hafas-client result cap. Row counts stayed plausible.
-  - PL lost ~5-6 hours of data on 2026-08-02 with no error anywhere.
-    mkuran.pl's own feed page documents the likely cause: "the upstream
-    endpoint is unstable, and the feed can remain stuck without updates
-    for over an hour once or twice per day" - a stuck feed serves a
-    perfectly valid 200 with perfectly valid, unchanging content.
-  - PL/DE's dedup silently dropped every recurring punctual trip until
-    2026-08-20, because the comparison wasn't scoped to the service day.
+  - Germany's first run resolved none of its rows: the poller ran and the
+    feed answered 200, but every stop_id was a platform row our stations
+    table excludes.
+  - Austria lost most of its feed to an unnoticed result cap in
+    hafas-client while row counts still looked plausible.
+  - Poland's upstream feed can get stuck for an hour or more, serving a
+    valid 200 with unchanging content.
+  - The Polish and German dedup once dropped every punctual recurring
+    trip, because the comparison was not scoped to the service day.
 
-So the checks here are about the *data*, not the process: is it arriving,
-is it moving, does it still have the shape we depend on, and does it still
-resolve at the rate it used to.
+So these checks look at the data, not the process: is it arriving, is it
+changing, does it still have the expected shape, and does it still resolve
+at its usual rate.
 
 Usage:
     python3 monitor.py           # DB-side checks only (cheap, every 15min)

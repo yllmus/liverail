@@ -23,10 +23,9 @@ a database.
 
 import unicodedata
 
-# Characters NFKD does not decompose, because the diacritic is part of the
-# letterform rather than a combining mark on top of it. Poland's `ł` is the
-# one that actually matters for this project (`Łódź`, `Główny`, `Wrocław`);
-# the rest are here so a future feed's border stations do not surprise us.
+# Letters NFKD does not decompose, because the stroke is part of the letter
+# rather than a combining mark. Polish ł is the one that matters here (Łódź,
+# Wrocław).
 _EXTRA_FOLDS = {
     "ł": "l", "Ł": "L",      # ł Ł  (pl)
     "ß": "ss",                     # ß    (de)

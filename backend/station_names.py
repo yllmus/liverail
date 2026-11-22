@@ -1,13 +1,8 @@
 import re
 
-# Confirmed non-rail rows in the DE static feed (41 total, verified against
-# the live DB - a plain substring check, not a stricter "must be
-# parenthesized" match, since some Bushaltestelle rows use
-# ", Bushaltestelle" with no parens at all. Checked query-wide: none of
-# these substrings appear anywhere in HU/AT/PL's station names today, so
-# this list is applied country-agnostically rather than DE-gated. Kept
-# short and literal on purpose - these are the only patterns actually
-# confirmed in real data. Do NOT extend this list from guesses.
+# Non-rail stops that appear in the German rail feed. Kept to the patterns
+# actually seen in the data, and matched as plain substrings because some of
+# them have no parentheses.
 _NON_RAIL_MARKERS = (
     "Bushaltestelle",
     "Parkeisenbahn",
@@ -40,18 +35,14 @@ def clean_display_name(name, country_code):
 
     cleaned = name.strip()
 
-    # DE only: "City, Stop" -> "City Stop" (1446/7870 = 18.4% of DE
-    # stations). Only the first comma is collapsed so a name with a second,
-    # unrelated comma later isn't mangled. HU also has a comma pattern
-    # (17/1197) but it's a legitimate MÁV on-street-halt naming convention,
-    # not broken - left untouched.
+    # Germany writes "City, Stop"; show it as "City Stop". Only the first comma
+    # is collapsed. Hungary's commas are a deliberate MÁV naming convention for
+    # street halts and are left alone.
     if country_code == "DE":
         cleaned = re.sub(r",\s+", " ", cleaned, count=1)
 
-    # All countries: normalize parenthetical spacing - exactly one space
-    # before "(", none just inside "(" or ")", one after ")" if glued to
-    # the next word. Handles "TP Summerau(Gr)" -> "TP Summerau (Gr)",
-    # "Halle(Saale)Hbf" -> "Halle (Saale) Hbf".
+    # Normalise spacing around parentheses: "Halle(Saale)Hbf" becomes "Halle
+    # (Saale) Hbf".
     cleaned = re.sub(r"\s*\(", " (", cleaned)
     cleaned = re.sub(r"\(\s+", "(", cleaned)
     cleaned = re.sub(r"\s+\)", ")", cleaned)

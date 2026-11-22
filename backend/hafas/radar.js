@@ -1,7 +1,7 @@
-// Oneshot script: fetch current ÖBB vehicle positions and print them as JSON.
-// Invoked fresh per call from austria_poller.py and from api.py's /live?country=AT
-// branch — deliberately not a persistent server (box is memory-constrained).
-// hafas-client is ESM-only, hence this file (and its package.json "type") is ESM too.
+// One-shot script: fetch current ÖBB vehicle positions and print them as JSON.
+// Run fresh for each call by austria_poller.py and by /live?country=AT rather
+// than as a persistent server, because the server had little memory to spare.
+// hafas-client is ESM-only, so this file is ESM too.
 import { createClient } from 'hafas-client';
 import { profile as oebbProfile } from 'hafas-client/p/oebb/index.js';
 
@@ -16,25 +16,14 @@ const bbox = {
 };
 
 try {
-  // client.radar() resolves to {movements: [...], realtimeDataUpdatedAt}.
-  // Only the array is written out — austria_poller.py's parse_at_vehicles()
-  // (and its test fixture) expect a bare list of vehicle movements.
+  // radar() resolves to {movements, realtimeDataUpdatedAt}; only the array is
+  // printed, which is what parse_at_vehicles() expects.
   //
-  // results was left at hafas-client's own default (256) - confirmed by
-  // direct testing this was silently truncating the real feed hard: Austria
-  // nationally has ~1000-1700+ concurrent train+bus movements (a raw
-  // results:3000 call returned 1689, well under that cap, i.e. the true
-  // count), of which ~900-1000 are mode:"train" - vs. the ~110-115 that
-  // made it through the old 256-item cap after bus-filtering. 2000 gives
-  // headroom above the observed high-water mark without asking HAFAS for
-  // an unbounded/unnecessarily large response.
-  //
-  // Raised 2000 -> 4000 on 2026-08-20: monitor.py's "did the feed come back
-  // pinned exactly at the cap" check fired at evening peak, and a probe
-  // confirmed the true count was 2143 movements (1056 trains) - so 2000 was
-  // quietly truncating again, the same failure the 256 default caused. The
-  // check stays in monitor.py precisely because this will recur as OBB's
-  // traffic grows; it should be caught rather than rediscovered.
+  // `results` defaults to 256 in hafas-client, far below the number of
+  // vehicles moving in Austria at once, so the default silently dropped most
+  // of the national feed. 2000 later proved too low at evening peak too.
+  // monitor.py flags a response that comes back exactly at the cap, because
+  // this limit will need raising again as traffic grows.
   const { movements } = await client.radar(bbox, { results: 4000, duration: 30 });
   process.stdout.write(JSON.stringify(movements));
 } catch (err) {

@@ -1,10 +1,7 @@
 import os
 
-# Absolute, derived from this file's own location rather than the process's
-# working directory. A relative ".env" works only while every caller starts
-# in this directory; anything run from elsewhere (a cron entry with a
-# different cwd, a restore on a freshly rebuilt box, a one-off script) would
-# silently fall through to no .env at all.
+# Resolved from this file's location, not the working directory, so cron jobs
+# and one-off scripts find the same .env.
 _ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
 
@@ -21,11 +18,8 @@ def _load_env_file(path=_ENV_PATH):
 
 _load_env_file()
 
-# No default. This used to fall back to a hardcoded literal, which meant a
-# missing or unreadable .env did not fail - it silently connected with a
-# known password instead. A restore that forgets to write .env should stop
-# immediately and say so, not come up half-working against a guessable
-# credential.
+# No default password: a missing .env should stop the program with a clear
+# error, not connect with a guessable credential.
 DB_PASSWORD = os.environ.get("TRAIN_DB_PASSWORD")
 if not DB_PASSWORD:
     raise RuntimeError(
@@ -44,10 +38,8 @@ DB_CONFIG = {
     "host": os.environ.get("TRAIN_DB_HOST", "localhost"),
 }
 
-# Web Push (VAPID). Optional, unlike the DB password: alerts are a feature, and
-# a box without keys should serve the rest of the site normally rather than
-# refuse to start. push_alerts and /push/* check PUSH_ENABLED and report the
-# feature as unavailable instead of raising.
+# Web Push (VAPID) keys are optional. Without them alerts report themselves as
+# unavailable and everything else runs normally.
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
 VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "mailto:admin@example.com")

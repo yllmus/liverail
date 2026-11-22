@@ -1,20 +1,14 @@
 """Add the HU stations MÁV's live feed reports but its static export omits.
 
-WHY THIS EXISTS. A coverage audit on 2026-08-22 found 23 of 296 Hungarian
-observations per poll - 7.8% - being silently discarded, all of them on HÉV
-lines (H5 Szentendre, H6 Ráckeve, H7 Csepel, H8/H9 Gödöllő). The Budapest
-suburban railway is a different agency from MÁV and is not exported alongside
-MÁV/GYSEV/Gyermekvasút in the static GTFS, so its stations - "Aquincum H",
-"Batthyány tér H", "Csepel H" and 16 others - exist in no table we hold.
+The Budapest suburban railway (HÉV) is a different agency from MÁV and is
+missing from MÁV's static GTFS, so its stations ("Aquincum H", "Csepel H" and
+others) exist in no table we hold, and poller.py discards every HÉV
+observation because its station lookup finds nothing.
 
-poller.py's INSERT is `SELECT s.id ... FROM stations s WHERE s.name = %s`, so
-an unknown station inserts zero rows and reports success. The trains were being
-observed, parsed, and thrown away.
-
-MÁV's own OTP endpoint does know these stops - the same host the poller already
-polls - with real coordinates and a vehicleMode of SUBURBAN_RAILWAY. So they
-are imported from the operator's own API rather than invented from vehicle
-positions, which would have put a station wherever a train happened to be.
+MÁV's own OTP endpoint, the one the poller already uses, does know these
+stops, with real coordinates. They are imported from there rather than
+inferred from vehicle positions, which would put a station wherever a train
+happened to be.
 
 Only RAIL and SUBURBAN_RAILWAY stops are taken. OTP also returns BUS stops
 sharing the same name ("Budapest, Aquincum H" is three separate bus stops), and

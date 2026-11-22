@@ -1,24 +1,17 @@
-// Oneshot script: plan an ÖBB journey between two stations and print the
-// itineraries as JSON. Third of the three HAFAS scripts, and deliberately the
-// same shape as radar.js and trip.js — oneshot subprocess, never a persistent
-// server, because this box is memory-constrained and already runs four
-// pollers alongside the API.
+// One-shot script: plan an ÖBB journey between two stations and print the
+// itineraries as JSON, for /plan in Austria. Same design as radar.js and
+// trip.js.
 //
-// Why this exists: /plan was Hungary-only, because MÁV's OTP is the one
-// planner of the four countries that we can call. Austria is the only other
-// one with a usable planner — hafas-client's oebb profile implements
-// journeys(). Germany's HAFAS is shut down and Poland's feed is a data mirror
-// with no planning API, so both of those need a connection-scan search over
-// the stop_times already imported; neither can be borrowed like this.
+// Austria and Hungary are the two countries with a planner we can call.
+// Germany's HAFAS is shut down and Poland's feed has no planning API, so those
+// two are planned by a connection scan over our own timetable.
 //
 // Usage: node journeys.js '<fromName>' '<toName>' '<ISO departure>' <results>
 //
-// Stations are resolved by NAME through HAFAS's own locations() lookup rather
-// than by passing coordinates, because ÖBB's planner keys on its own station
-// ids and a nearby-coordinate match silently plans from the wrong platform
-// cluster at large stations. The caller passes the name it holds; this script
-// does the resolution and reports what it matched, so a wrong match is
-// visible rather than silent.
+// Stations are resolved by name through HAFAS's locations() rather than by
+// coordinates, because ÖBB's planner keys on its own station ids and a
+// coordinate match can pick the wrong platform cluster at a large station. The
+// script reports what it matched, so a wrong match is visible.
 import { createClient } from 'hafas-client';
 import { profile as oebbProfile } from 'hafas-client/p/oebb/index.js';
 

@@ -48,13 +48,10 @@ def _current_stop_update(updates, now_epoch):
 
 
 def parse_pl_vehicles(feed, now_epoch=None):
-    # Pure extraction, no DB. Confirmed against the real feed: mkuran.pl's
-    # TripUpdates never set stop_id, route_id, or a delay field - only
-    # stop_sequence and absolute Unix timestamps (arrival.time/departure.time).
-    # Resolving a station/schedule and computing delay needs the paired
-    # static feed's stop_times (imported via `import.py --with-stop-times`),
-    # done separately in resolve_delays() so this stays DB-independent and
-    # unit-testable, same as parse_vehicles()/parse_at_vehicles().
+    # Pure extraction, no database. This feed sets no stop_id, no route_id and
+    # no delay, only stop_sequence and absolute timestamps. Finding the station
+    # and computing the delay needs our imported stop_times and happens in
+    # resolve_delays(), so this function stays unit-testable.
     if now_epoch is None:
         now_epoch = time.time()
     rows = []
@@ -67,12 +64,9 @@ def parse_pl_vehicles(feed, now_epoch=None):
         if not gtfs_trip_id or not start_date:
             continue
 
-        # A cancelled trip carries no stop_time_updates at all (confirmed:
-        # 55/55 of the feed's CANCELED trips had zero), so the
-        # stop_time_update requirement below used to drop every single one -
-        # the whole reason is_cancelled was never once written. There is no
-        # "current stop" to attribute it to either; resolve_delays() uses the
-        # trip's scheduled origin instead.
+        # A cancelled trip carries no stop_time_updates, so it is handled
+        # before the loop that needs them. It has no current stop either;
+        # resolve_delays() attributes it to the trip's scheduled origin.
         if trip_update.trip.schedule_relationship == gtfs_realtime_pb2.TripDescriptor.CANCELED:
             rows.append({
                 "gtfs_trip_id": gtfs_trip_id,
@@ -85,32 +79,18 @@ def parse_pl_vehicles(feed, now_epoch=None):
 
         if not trip_update.stop_time_update:
             continue
-        # The stop the train is actually AT, not stop_time_update[0].
-        #
-        # [0] was the original choice, by analogy with AT's nextStopovers[0].
-        # It is wrong for this feed, and measurably so: mkuran.pl publishes the
-        # WHOLE trip starting at stop_sequence 0, including trips that do not
-        # depart for another two or three hours. So [0] is always the trip's
-        # ORIGIN. It never advances as the train runs, which had two
-        # consequences:
-        #   * the recorded "delay" was the delay at the origin - frequently a
-        #     forecast for a train that had not left yet - rather than where
-        #     the train was;
-        #   * every trip produced exactly one distinct stop per day. Poland
-        #     held 6.45M observations across 182,682 trip-days at 1.00 stops
-        #     each, so the country with the most data had no journeys in it at
-        #     all, and no per-train forecast could be built from it.
-        # Germany never had this because its feed publishes only REMAINING
-        # stops, so its [0] advances naturally.
-        #
-        # Picking the next stop whose time has not yet passed tracks the train
-        # along its route, one row per stop it actually reaches.
+        # The stop the train is heading for now, not stop_time_update[0]. This
+        # feed publishes every trip from its first stop, including trips that
+        # have not departed, so [0] is always the origin and never advances as
+        # the train runs. Taking the next stop whose time has not passed
+        # follows the train along its route, one row per stop it reaches.
+        # (Germany's feed lists only the remaining stops, so its [0] already
+        # advances.)
         stu = _current_stop_update(trip_update.stop_time_update, now_epoch)
 
-        # A SKIPPED stop means the train runs but is not calling here. It has
-        # no arrival/departure time (there is no arrival to predict), so it
-        # would fail the actual_epoch check below and be discarded - which is
-        # exactly the information a rider waiting at that stop needs most.
+        # A SKIPPED stop means the train runs but does not call here. It has no
+        # time, so it would fail the timestamp check below and be lost, and it
+        # is exactly what a rider waiting at that stop needs to know.
         if stu.schedule_relationship == gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED:
             rows.append({
                 "gtfs_trip_id": gtfs_trip_id,
@@ -121,12 +101,8 @@ def parse_pl_vehicles(feed, now_epoch=None):
             })
             continue
 
-        # Arrival and departure are kept apart as well as collapsed. A
-        # transfer needs the feeder's ARRIVAL and the connector's DEPARTURE,
-        # and they are genuinely different numbers at a stop where a train
-        # waits. actual_epoch keeps its original meaning (arrival preferred,
-        # departure as fallback) so delay_minutes and every existing caller
-        # are untouched.
+        # Keep arrival and departure separately, as in poller.py. actual_epoch
+        # prefers the arrival, falling back to the departure.
         arrival_epoch = stu.arrival.time if (stu.HasField("arrival") and stu.arrival.HasField("time")) else None
         departure_epoch = stu.departure.time if (stu.HasField("departure") and stu.departure.HasField("time")) else None
         actual_epoch = arrival_epoch if arrival_epoch is not None else departure_epoch
@@ -144,9 +120,8 @@ def parse_pl_vehicles(feed, now_epoch=None):
     return rows
 
 def _scheduled_epoch(start_date, hms):
-    # start_date: "YYYYMMDD" (GTFS-RT TripDescriptor format). hms: GTFS's
-    # "HH:MM:SS" local wall-clock time, which may exceed 24:00:00 for a
-    # service continuing past midnight relative to start_date.
+    # start_date is "YYYYMMDD". hms is local "HH:MM:SS" and can exceed 24:00:00
+    # for a service that runs past midnight.
     if not hms:
         return None
     h, m, s = (int(x) for x in hms.split(":"))
@@ -156,19 +131,11 @@ def _scheduled_epoch(start_date, hms):
     return naive.replace(tzinfo=WARSAW_TZ).timestamp()
 
 def _interpolate_position(prev_lat, prev_lon, prev_epoch, target_lat, target_lon, target_epoch, now_epoch):
-    # Pure math, no DB/time.time() dependency (now_epoch is a parameter, not
-    # read internally) so this is directly unit-testable. No live GPS exists
-    # for PL - confirmed directly (mkuran.pl's own file listing has no
-    # position feed alongside updates.pb for polish_trains specifically,
-    # its README states live positions "may be available sometime in the
-    # future", and PKP PLK's own full OpenAPI schema - the same one their
-    # official passenger portal calls - has zero lat/lon/coordinate fields
-    # anywhere, checked field-by-field). This estimates a marker between the
-    # previous scheduled stop and the target one, proportional to elapsed vs
-    # scheduled travel time - the same technique Deutsche Bahn's own
-    # official "Zugradar" used for years (it also wasn't real GPS) before
-    # being retired, not a fabricated position. Callers must label this
-    # distinctly from HU/AT's real GPS - see position_source.
+    # No live GPS exists for Poland, so the position is estimated between the
+    # previous and the next scheduled stop, in proportion to elapsed and
+    # scheduled travel time. Callers must label it as an estimate (see
+    # position_source). Pure function: now_epoch is passed in, so it is
+    # unit-testable.
     if prev_lat is None or prev_lon is None or prev_epoch is None or target_epoch <= prev_epoch:
         return None, None
     fraction = max(0.0, min(1.0, (now_epoch - prev_epoch) / (target_epoch - prev_epoch)))
@@ -177,21 +144,17 @@ def _interpolate_position(prev_lat, prev_lon, prev_epoch, target_lat, target_lon
     return lat, lon
 
 def resolve_delays(cur, rows, now_epoch=None):
-    # DB-dependent step. Joins each raw (trip_id, stop_sequence) against our
-    # stop_times table to get the scheduled stop and scheduled time, then
-    # delay = actual - scheduled. Silently resolves to nothing if the trip
-    # isn't in our PL trips (unimported/stale) or the stop_id it references
-    # was one of the platform-level rows import.py's parent_station filter
-    # excluded from stations - same graceful-skip behavior as HU/AT.
+    # Joins each (trip_id, stop_sequence) to our stop_times for the scheduled
+    # stop and time, then delay = actual - scheduled. Rows whose trip or stop
+    # is not in our tables are skipped, as for the other countries.
     if now_epoch is None:
         now_epoch = time.time()
     resolved = []
     for row in rows:
         kind = row.get("cancellation_kind")
         if kind == "trip":
-            # No stop_sequence to match on - a cancelled trip publishes no
-            # stop_time_updates. Attribute it to the trip's scheduled origin,
-            # which is where a rider would have been standing.
+            # A cancelled trip has no stop_sequence. Attribute it to the
+            # scheduled origin, where a rider would have been waiting.
             cur.execute("""
                 SELECT st.station_id, st.scheduled_arrival, st.scheduled_departure,
                        s.name, s.lat, s.lon, r.name, t.headsign, t.id, st.stop_sequence
@@ -216,21 +179,16 @@ def resolve_delays(cur, rows, now_epoch=None):
         match = cur.fetchone()
         if not match:
             continue
-        # stop_sequence comes back from OUR stop_times rather than being
-        # echoed from the feed. For a stop-level row the two are equal by
-        # construction (the query matched on it); for a trip cancellation the
-        # feed publishes none at all and this is the only way to record which
-        # stop the row was attributed to.
+        # stop_sequence comes from our stop_times, not the feed, because a trip
+        # cancellation carries none.
         (station_id, sched_arrival, sched_departure, station_name,
          target_lat, target_lon, route_name, headsign, trip_id,
          stop_sequence) = match
 
         if kind:
-            # A train that is not calling here has no delay - not zero. Writing
-            # 0 would count every cancellation as an on-time arrival in the
-            # reliability aggregates, and no position is estimated either
-            # (interpolating toward a stop the train will never make would
-            # draw a marker for a journey that isn't happening).
+            # A train that does not call here has no delay. Writing 0 would
+            # count every cancellation as an on-time arrival. No position is
+            # estimated either, since the train is not heading for this stop.
             resolved.append({
                 "station_id": station_id,
                 "station_name": station_name,
@@ -256,17 +214,9 @@ def resolve_delays(cur, rows, now_epoch=None):
         if scheduled_epoch is None:
             continue
 
-        # A "delay" beyond 12 hours is a schedule-version mismatch, not a late
-        # train. This feed's stop_sequence numbering usually matches our
-        # imported static snapshot (measured: 399/400 sampled trips have every
-        # feed sequence inside the static trip's own range), but a few trips -
-        # international ones especially - get renumbered upstream, so the
-        # sequence-to-sequence match above pairs the wrong stops and produces
-        # ~20-hour figures. One real example, PLK_LEO_2026_516260411, is
-        # numbered 15-31 in the feed and 0-16 in stop_times. These were being
-        # written to history as real observations (they are why PL's worst_delay
-        # reads 1182 minutes); skipped now, same graceful-skip convention as
-        # every other row this function can't resolve.
+        # A delay beyond 12 hours means the feed and our static snapshot number
+        # this trip's stops differently, so the match above paired the wrong
+        # stops. Skip it rather than store a 20-hour "delay".
         delay_minutes = round((row["actual_epoch"] - scheduled_epoch) / 60, 2)
         if abs(delay_minutes) > MAX_PLAUSIBLE_DELAY_MIN:
             continue
@@ -292,9 +242,7 @@ def resolve_delays(cur, rows, now_epoch=None):
             if lat is not None:
                 position_source = "estimated"
 
-        # Same plausibility guard as delay_minutes above - a split delay
-        # derived from a mismatched stop_sequence is wrong in exactly the
-        # same way, and must not slip into history through a new column.
+        # The same guard for the split arrival and departure delays.
         def _split_delay(actual, sched_hms):
             if actual is None or not sched_hms:
                 return None
@@ -319,34 +267,21 @@ def resolve_delays(cur, rows, now_epoch=None):
             "lon": lon,
             "position_source": position_source,
             "trip_id": trip_id,
-            # The feed's own trip id, carried through unresolved alongside our
-            # integer trips.id. api.py's /train/{country}/{id} needs it to find
-            # this exact trip again in a freshly-fetched feed (the only place
-            # the rest of the journey's stop_time_updates live) - our own
-            # trip_id can't address the feed.
+            # The feed's own trip id, alongside our trips.id.
+            # /train/{country}/{id} needs it to find this trip again in a
+            # freshly fetched feed.
             "gtfs_trip_id": row["gtfs_trip_id"],
             "is_cancelled": False,
             "cancellation_kind": None,
-            # PL is the one country with no platform data anywhere: the feed
-            # sets no stop_id, stop_time_properties.assigned_stop_id is
-            # 0/15231, and the static child rows carry no platform_code
-            # either. Present and always None so every country's resolved row
-            # has the same shape.
+            # Poland publishes no platform data anywhere. The key is present so
+            # every country's rows have the same shape.
             "platform": None,
         })
-    # mkuran.pl's live feed can legitimately carry two simultaneously-active
-    # entities for the same recurring gtfs_trip_id at once (e.g. an overnight
-    # service still running under yesterday's start_date, plus today's
-    # edition of the same daily service already appearing) - confirmed
-    # against the real feed: distinct entity.id, distinct (trip_id,
-    # start_date) pairs, so this isn't a malformed/duplicated feed. But
-    # trips/stop_times hold no per-service-day rows, only a single static
-    # schedule per gtfs_trip_id, so both entities resolve to an identical
-    # station/route/headsign here and would otherwise be written as
-    # indistinguishable duplicate rows (confirmed: ~4-6% of a poll's rows).
-    # Properly attributing each to its own service-day instance needs a
-    # schema that records start_date, which delay_observations doesn't -
-    # until then, collapse to one row per trip_id rather than double-count.
+    # The feed can carry two active entities for one recurring trip (an
+    # overnight run still on yesterday's start_date and today's run). Our
+    # tables keep one schedule per trip, so both resolve identically and would
+    # be written as duplicate rows. Keep one per trip until the schema records
+    # start_date.
     return list({r["trip_id"]: r for r in resolved}.values())
 
 def poll():
@@ -360,29 +295,14 @@ def poll():
         resolved = resolve_delays(cur, raw_rows)
         print(f"Resolved {len(resolved)}/{len(raw_rows)} against known stations/schedule")
 
-        # mkuran.pl's first stop_time_update for a trip stays the same predicted
-        # stop for many consecutive polls until the train actually reaches it -
-        # writing a fresh row every 5 min regardless was the dominant driver of
-        # DB growth (confirmed: ~1.5-1.8M PL rows/day, ~193x more than the
-        # distinct (trip_id, delay_minutes) pairs actually observed). Only write
-        # a new row when the delay for a trip has actually changed since its
-        # last recorded observation.
-        # Scoped to TODAY, which the first version of this wasn't - and that was a
-        # real data-integrity bug, not a nuance. 92.8% of PL trip_ids recur across
-        # days (DE 43.2%, both measured), and ~71% of PL rows are exactly 0.0
-        # minutes, so an unscoped "has this trip's delay changed since its last
-        # observation" meant a train that runs punctually every day was recorded
-        # once and then never again - every later day silently vanished. Comparing
-        # within the service day gives each trip at least one row per day while
-        # still collapsing the repeat-every-5-minutes noise this was written for.
-        # Compared as a (delay, cancelled) pair, not delay alone: a trip that gets
-        # cancelled goes from some delay to delay NULL, and a NULL never equals
-        # anything in Python's `==` sense against a float - but a trip already
-        # recorded as cancelled would otherwise re-write an identical row every
-        # 5 minutes for the rest of the day, since NULL == NULL is True here.
-        # Pairing them keeps both transitions (running -> cancelled and cancelled
-        # -> running again) as real, recorded events while still collapsing the
-        # repeat-every-poll noise this dedup was written for.
+        # Only write a row when something changed. The feed repeats the same
+        # prediction every poll until the train reaches the stop, so writing
+        # every poll stored the same fact hundreds of times.
+        #
+        # The comparison is scoped to today. Most Polish trip ids recur daily,
+        # so an unscoped check would record a punctual daily train once and
+        # never again. Delay and cancellation are compared as a pair, so both
+        # becoming cancelled and running again are recorded.
         trip_ids = [row["trip_id"] for row in resolved]
         cur.execute("""
             SELECT DISTINCT ON (trip_id, station_id) trip_id, station_id,
@@ -397,22 +317,10 @@ def poll():
         skipped = 0
         cancelled_count = 0
         for row in resolved:
-            # Keyed on (trip, STATION), not on the trip alone.
-            #
-            # Keying on the trip alone skipped the insert whenever the delay was
-            # unchanged - including when the train had moved on to a completely
-            # different stop. The row that would have recorded "this train reached
-            # the next station, still 4 minutes down" was thrown away as a
-            # duplicate, so Poland held 6.45M observations and exactly ZERO
-            # journeys: 182,682 trip-days, every one of them at 1.0 distinct stops.
-            # That is the whole trajectory signal, and no forecast can be built
-            # without it.
-            #
-            # Germany never had this problem because its dedup already keyed on
-            # (trip_id, stop_sequence), which is why DE is the only country with
-            # usable trajectories today. Genuinely redundant repeats - same train,
-            # same stop, same delay - are still skipped, so this adds at most one
-            # row per stop a train actually calls at.
+            # Keyed on (trip, station), not the trip alone. Keying on the trip
+            # skipped the insert whenever the delay was unchanged, even after
+            # the train had moved to a new stop, so no journey was ever
+            # recorded. Same train, same stop, same delay is still skipped.
             if last_state.get((row["trip_id"], row["station_id"])) == (
                     row["delay_minutes"], row["is_cancelled"]):
                 skipped += 1

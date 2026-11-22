@@ -1,16 +1,10 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-# GTFS scheduled times are local wall-clock strings with no timezone info,
-# but this box's system clock runs in UTC - found while debugging why AT's
-# schedule disambiguation was resolving almost nothing even for clearly
-# unambiguous-looking cases: a naive datetime.now() call is 1-2h off from
-# Central European (Summer) Time depending on DST, which silently defeated
-# both the calendar day-of-week check (wrong near midnight) and the
-# TRIP_MATCH_TOLERANCE_MIN schedule comparison (wrong all day, every day).
-# Every caller must resolve "now" through local_now(country_code) rather
-# than relying on the now=None default below, which stays naive UTC only
-# because tests exercise it directly with an explicit `now`.
+# GTFS times are local wall-clock strings, but the server clock is UTC, so
+# comparing them with a naive datetime.now() is wrong by one or two hours.
+# Callers pass local_now(country_code). The now=None default exists for tests,
+# which always pass an explicit time.
 COUNTRY_TIMEZONES = {
     "HU": "Europe/Budapest",
     "AT": "Europe/Vienna",
@@ -24,10 +18,9 @@ def local_now(country_code):
     return datetime.now(ZoneInfo(tz)).replace(tzinfo=None)
 
 
-# How close a candidate trip's scheduled time at the observed station has to
-# be to the live observation's estimated scheduled time (now - delay) to be
-# accepted. Looser would start guessing between e.g. the morning and evening
-# runs of the same numbered service.
+# How close a candidate's scheduled time at this station must be to the
+# observation's scheduled time (now minus delay). Looser would start guessing
+# between the morning and evening runs of the same number.
 TRIP_MATCH_TOLERANCE_MIN = 25
 
 
@@ -59,8 +52,8 @@ def narrow_to_running_today(cur, country_code, trip_ids, now=None):
 
 
 def _minutes_of_day(hms):
-    # GTFS wall-clock, which may exceed 24:00:00 for a service continuing
-    # past midnight - wrapped so it compares against a real clock time.
+    # GTFS times can exceed 24:00:00 for a service running past midnight, so
+    # wrap them to a real clock time.
     try:
         h, m, _ = (int(x) for x in hms.split(":"))
     except (ValueError, AttributeError):
@@ -88,15 +81,10 @@ def disambiguate_by_schedule(cur, country_code, trip_ids, station_names, delay_m
         WHERE st.trip_id = ANY(%s) AND s.name = ANY(%s) AND s.country_code = %s
     """, (trip_ids, station_names, country_code))
     found = cur.fetchall()
-    # If every candidate that has schedule data at this station agrees on the
-    # exact same time, they aren't distinct services to pick between - they
-    # are the same physical trip duplicated across multiple static GTFS rows
-    # (confirmed against real AT data: 20/22 of AT's remaining post-calendar
-    # ties are exactly this - e.g. Nightjet 448 to Bruxelles Midi exists as
-    # 14 separate trip rows, all departing Wien Hauptbahnhof at 18:13). Same
-    # "genuinely duplicate, pick one" convention this project already uses
-    # for duplicate *station* name rows (LIMIT 1) - any one of them
-    # describes the same real train equally correctly.
+    # If every candidate with a schedule here agrees on the exact same time,
+    # they are one physical train duplicated across several static GTFS rows (a
+    # night train can appear as a dozen identical trips). Any of them describes
+    # the train correctly, so take the lowest id.
     times = {hms for _, hms in found}
     if len(times) == 1:
         return min(trip_id for trip_id, _ in found)
