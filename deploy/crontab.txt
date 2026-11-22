@@ -1,36 +1,16 @@
-# Edit this file to introduce tasks to be run by cron.
-# 
-# Each task to run has to be defined through a single line
-# indicating with different fields when the task will be run
-# and what command to run for the task
-# 
-# To define the time you can provide concrete values for
-# minute (m), hour (h), day of month (dom), month (mon),
-# and day of week (dow) or use '*' in these fields (for 'any').
-# 
-# Notice that tasks will be started based on the cron's system
-# daemon's notion of time and timezones.
-# 
-# Output of the crontab jobs (including errors) is sent through
-# email to the user the crontab file belongs to (unless redirected).
-# 
-# For example, you can run a backup of all your user accounts
-# at 5 a.m every week with:
-# 0 5 * * 1 tar -zcf /var/backups/home.tgz /home/
-# 
-# For more information see the manual pages of crontab(5) and cron(8)
-# 
 # m h  dom mon dow   command
+# The pollers, alert checker and retrain run as systemd timers (deploy/systemd).
+# Cron only holds the health checks and the monthly feed refresh.
+
+# Poller health checks: resolve ratio per country, and a deeper pass hourly.
 */15 * * * * cd /home/ubuntu && /usr/bin/python3 monitor.py >> /home/ubuntu/monitor.log 2>&1
 17 * * * * cd /home/ubuntu && /usr/bin/python3 monitor.py --deep >> /home/ubuntu/monitor.log 2>&1
-30 3 * * * /home/ubuntu/backup_db.sh >> /home/ubuntu/backup_db.log 2>&1
 
-# Monthly static-GTFS refresh. These feeds drift away from the live ones
-# silently: Germany lost 99.7% of its observations for twelve days in August
-# 2026 because gtfs.de reissued stop_ids and nothing re-imported, and Poland
-# ran 29% short for three weeks for the same reason. monitor.py detects that;
-# this prevents it. Staggered across three nights because each import is
-# hours long and they must not overlap on a two-core box.
+# Monthly static-GTFS refresh. Schedule feeds drift away from the live ones
+# without any error: Germany once lost almost all of its observations for
+# twelve days because gtfs.de reissued its stop ids and nothing re-imported.
+# monitor.py detects that, and this prevents it. Staggered across three nights
+# because each import takes hours and they must not overlap on a small box.
 30 2 1 * * cd /home/ubuntu && /usr/bin/python3 refresh_static_feeds.py --country AT --write >> /home/ubuntu/refresh_feeds.log 2>&1
 30 2 2 * * cd /home/ubuntu && /usr/bin/python3 refresh_static_feeds.py --country PL --write >> /home/ubuntu/refresh_feeds.log 2>&1
 30 2 3 * * cd /home/ubuntu && /usr/bin/python3 refresh_static_feeds.py --country DE --write >> /home/ubuntu/refresh_feeds.log 2>&1

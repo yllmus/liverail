@@ -2,7 +2,7 @@
 --
 -- WHY THIS EXISTS. The transfer probability was shipped unverified for weeks
 -- and turned out to be systematically pessimistic in every reliability bin
--- (see TRANSFER_RELIABILITY.md). Nothing detected that, because nothing was
+-- (see docs/delay-forecasting.md). Nothing detected that, because nothing was
 -- scoring it. A system that retrains on new data automatically has the same
 -- failure mode with a shorter fuse: it can degrade silently and continuously.
 --

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Move this project to a new machine with the smallest possible data gap.
 #
-# RESTORE.md builds a box from nothing. This is the other half: cutting a
+# docs/deployment.md covers a first install. This is the other half: cutting a
 # LIVE box over to a new one without losing observations or writing to two
 # databases at once. Run `freeze` on the old machine and `restore` on the new.
 #

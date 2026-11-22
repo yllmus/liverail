@@ -196,7 +196,7 @@ for _, row in routes.iterrows():
     # Only keep long_name as a separate friendly-name field when it's real
     # extra information - i.e. short_name won the `name` slot above. When
     # short_name was blank and long_name became `name` itself, storing it
-    # again here would just be the same string twice (see item 7's
+    # again here would just be the same string twice (see
     # 004_route_long_name.sql for why this column exists at all: AT/PL's
     # route_long_name is a real "origin - destination" corridor description
     # that route_short_name-preferring `name` was discarding entirely).

@@ -43,6 +43,6 @@ CREATE INDEX IF NOT EXISTS idx_service_calendar_lookup
     ON service_calendar (country_code, service_id);
 
 -- Same ownership gap as every other table here: created as postgres, used by
--- trainuser (see NOTES.md "Grants").
+-- trainuser.
 GRANT ALL ON service_calendar TO trainuser;
 GRANT ALL ON SEQUENCE service_calendar_id_seq TO trainuser;

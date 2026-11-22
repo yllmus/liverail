@@ -10,7 +10,7 @@
 --   similarity ranking, but it needs something indexable to rank *over* -
 --   and route names live in delay_observations.route_name, a 15M-row table
 --   whose DISTINCT scan already had to be cached to keep /routes from
---   timing out (NOTES.md, Compare/Rankings bugfix). Searching that
+--   timing out. Searching that
 --   directly per keystroke is not an option.
 --
 --   SEO SAFETY (worklist item 8). /sitemap.xml currently submits every

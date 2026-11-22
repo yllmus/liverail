@@ -1,6 +1,5 @@
 -- Real, sourced EU rail passenger-rights compensation figures, researched
--- 2026-08-20 (see MONETIZATION_READINESS.md for the full writeup and
--- source list). All four countries are EU members and Regulation (EU)
+-- 2026-08-20 from each operator's own passenger-rights page. All four countries are EU members and Regulation (EU)
 -- 2021/782 sets the baseline (60min=25%, 120min=50%, delay measured at
 -- the destination station on the ticket) - AT/DE/PL all match this
 -- baseline exactly per their own operators' published passenger-rights

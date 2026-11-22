@@ -33,10 +33,10 @@ def station_name_candidates(name):
     if stripped != name:
         candidates.append(stripped)
     # HAFAS omits the space after an abbreviating dot that the static feed
-    # keeps: "St.Pölten Hbf" against "St. Pölten Hauptbahnhof". NOTES.md
-    # logged this as a known unhandled case; it was worth 7 dropped
-    # observations in a single poll. Generalised rather than special-cased on
-    # "St." - the same shape appears in "Kl.", "Gr.", "Bhf." and others.
+    # keeps: "St.Pölten Hbf" against "St. Pölten Hauptbahnhof". It was worth 7
+    # dropped observations in a single poll. Generalised rather than
+    # special-cased on "St." - the same shape appears in "Kl.", "Gr.", "Bhf."
+    # and others.
     spaced = re.sub(r"\.(?=\S)", ". ", name).strip()
     bases = [name, stripped]
     if spaced not in bases:
@@ -73,11 +73,10 @@ def station_name_candidates(name):
 
 def resolve_trip_id(cur, number, stop_name=None, delay_minutes=None, now=None):
     # AT's live radar() tripId is a HAFAS-internal composite key with no
-    # relationship to trips.gtfs_trip_id (see NOTES.md "Live per-train
-    # identity" - confirmed structural, not a staleness issue, same as HU's
-    # gtfsId problem). NOTES.md had concluded AT was unfixable on the
-    # strength of HAFAS's line.fahrtNr being 0/652 filled - but that's a
-    # different field. The live line *name* itself ("RJX 639") already
+    # relationship to trips.gtfs_trip_id (structural, not a staleness issue,
+    # same as HU's gtfsId problem). HAFAS's line.fahrtNr is 0/652 filled, so
+    # the number can't come from that field. The live line *name* itself
+    # ("RJX 639") already
     # carries the train's public number, in the same "CATEGORY NUMBER"
     # order as the static feed's own trip_short_name (confirmed: 14,690/
     # 15,165 AT trips have it filled, e.g. "RJ 658", "REX 7013") - so the
@@ -164,8 +163,8 @@ def parse_at_vehicles(movements):
             continue
         # HAFAS labels Vienna's street trams and the U-Bahn as mode "train",
         # separated from actual rail only by `product`. This project used to
-        # keep them deliberately (see NOTES.md) on the grounds that genuine
-        # tram-trains are labelled identically and could not be separated.
+        # keep them deliberately, on the grounds that genuine tram-trains are
+        # labelled identically and could not be separated.
         # Measured on 2026-08-22, that trade was a bad one: 264 tram rows per
         # poll, of which only 29 resolved to any station at all, because
         # OBB's rail GTFS contains no tram stops - 0 of its 1,173 stations
@@ -255,8 +254,7 @@ def parse_at_vehicles(movements):
             # structurally can never be joined against trips.gtfs_trip_id
             # (confirmed: AT's static trip ids look like
             # "1.TA.1-80-j26-1.1.H" - disjoint namespace, not a formatting
-            # mismatch). Stored opaque/unresolved, same convention as HU -
-            # see NOTES.md "Live per-train identity".
+            # mismatch). Stored opaque/unresolved, same convention as HU.
             "live_trip_id": m.get("tripId"),
             # See resolve_trip_id() below - a second, independent identity
             # path that (unlike live_trip_id/tripId) can sometimes actually
@@ -289,7 +287,7 @@ def poll():
     # dedup keyed on the whole string skipped almost nothing. The #ZI# field
     # is the journey id and does hold still, which is why hafas_journey_id()
     # pulls it out. trip_id is no good either: it resolves for barely half of
-    # AT's vehicles (NOTES.md, "Live per-train identity"), so keying on it
+    # AT's vehicles, so keying on it
     # would treat every unresolved train as brand new.
     for r in rows:
         r["_zi"] = hafas_journey_id(r.get("live_trip_id"))

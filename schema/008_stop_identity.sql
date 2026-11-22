@@ -36,7 +36,7 @@
 -- sampled HU trips number their stops consecutively at all - so OTP's
 -- pattern index and our stop_sequence are different numbering schemes.
 -- Writing one into the other is precisely the mistake that produced PL's
--- 20-hour phantom delays (see NOTES.md, MAX_PLAUSIBLE_DELAY_MIN).
+-- 20-hour phantom delays (see MAX_PLAUSIBLE_DELAY_MIN).
 --
 -- NOTE ON scheduled_time. Stored as the raw GTFS wall-clock string
 -- ("HH:MM:SS", which legitimately exceeds 24:00:00 for services continuing

@@ -23,10 +23,9 @@ _load_env_file()
 
 # No default. This used to fall back to a hardcoded literal, which meant a
 # missing or unreadable .env did not fail - it silently connected with a
-# known password instead, and that literal is in this repo's history back to
-# the initial commit (see NOTES.md, "Rotating the DB password"). A restore
-# that forgets to write .env should stop immediately and say so, not come up
-# half-working against a guessable credential.
+# known password instead. A restore that forgets to write .env should stop
+# immediately and say so, not come up half-working against a guessable
+# credential.
 DB_PASSWORD = os.environ.get("TRAIN_DB_PASSWORD")
 if not DB_PASSWORD:
     raise RuntimeError(

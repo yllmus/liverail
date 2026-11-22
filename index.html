@@ -1213,8 +1213,8 @@ function renderRankTable(kind){
 /* There is deliberately no name-list prefetch any more. This used to fetch
    the whole of /stations and /routes for a country on every page load and
    every country switch, purely to feed the client-side substring matcher
-   below - and /routes alone measured 8.6s for HU and 10.5s for PL (see
-   NOTES.md's Compare/Rankings bugfix). /search does the matching
+   below - and /routes alone measured 8.6s for HU and 10.5s for PL.
+   /search does the matching
    server-side now, so nothing consumes those lists. */
 /* Server-side, typo-tolerant search (/search, backed by pg_trgm over the
    search_index table). This replaced a client-side substring match over the

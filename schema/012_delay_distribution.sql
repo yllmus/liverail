@@ -8,7 +8,7 @@
 --
 -- WHY A TABLE AND NOT A QUERY. These are whole-table aggregates over 15.8M
 -- rows. Computing one inside a request is how /routes/summary and
--- /sitemap.xml became multi-second endpoints (see NOTES.md). Refreshed from
+-- /sitemap.xml became multi-second endpoints. Refreshed from
 -- the existing background warmer thread instead, exactly like search_index -
 -- same pattern, same reasoning, same thread.
 --

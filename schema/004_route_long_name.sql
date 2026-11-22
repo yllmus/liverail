@@ -11,8 +11,7 @@
 -- routes have a real route_long_name (e.g. "Katowice - Mysłowice - Kraków"),
 -- AT 268/273 (e.g. "Wien - Salzburg - Kufstein - Innsbruck - Bludenz -
 -- Bregenz"), DE 0/97 (fv_free) and 0/964 (rv_free) - completely absent,
--- confirming NOTES.md's existing note that DE has no friendly-name data
--- to map to. This column will simply stay NULL for DE and for HU (HU's own
+-- so there is no friendly-name data to map to for DE. This column will simply stay NULL for DE and for HU (HU's own
 -- routes.name is already a real train-number identifier, not a raw code
 -- needing a friendly gloss).
 --

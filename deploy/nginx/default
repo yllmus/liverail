@@ -14,8 +14,8 @@ server {
 		proxy_set_header Host $host;
 		proxy_set_header X-Real-IP $remote_addr;
 		# sitemap.xml can hit a cold routes_list cache across all 4 countries -
-		# same disk-bound whole-table-scan cost as /routes/Compare (see
-		# NOTES.md); default 60s isn't always enough for that first miss.
+		# same disk-bound whole-table-scan cost as /routes/Compare; the
+		# default 60s isn't always enough for that first miss.
 		proxy_read_timeout 120s;
 	}
 

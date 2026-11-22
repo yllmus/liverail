@@ -16,13 +16,13 @@
 -- identity /train/{country}/{id} already uses:
 --     HU, AT   live_trip_id  - the raw feed id, opaque, not joinable
 --     PL, DE   gtfs_trip_id  - joins to trips, a real schedule identity
--- Deliberately not normalised into one scheme. NOTES.md documents that as the
--- exact mistake to avoid, and it would fail: HAFAS's tripId is a composite
+-- Deliberately not normalised into one scheme: that would be the wrong
+-- abstraction, and it would fail anyway, because HAFAS's tripId is a composite
 -- internal key that cannot be made into a GTFS id.
 --
 -- WATCHES EXPIRE, AND MUST. A train id is not a train forever:
 --   * gtfs.de reissues trip ids per service day - 0 of 228,547 DE
---     trip-station combinations appear on 8+ days (DELAY_STRUCTURE.md).
+--     trip-station combinations appear on 8+ days (docs/delay-forecasting.md).
 --   * 931 of 5,328 HU live_trip_ids have carried more than one route_name,
 --     i.e. MÁV's OTP recycles them onto different trains.
 -- A watch that outlived its journey would therefore alert about a DIFFERENT

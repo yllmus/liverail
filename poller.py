@@ -93,8 +93,8 @@ def parse_vehicles(data):
             # this does NOT match trips.gtfs_trip_id for any sampled trip in
             # our imported static feed (checked directly against the real
             # endpoint + DB, 0/4 matched, exact and substring). Stored as an
-            # opaque, unresolved identifier for now - see NOTES.md "Live
-            # per-train identity" for why this isn't joined to `trips`.
+            # opaque, unresolved identifier for now; it isn't joinable to
+            # `trips`.
             "live_trip_id": trip.get("gtfsId"),
             # See resolve_trip_id() below - a second, independent identity
             # path that (unlike live_trip_id/gtfsId) can sometimes actually

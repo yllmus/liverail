@@ -15,7 +15,7 @@
 -- heap so that one day's worth could be kept. Today's date looked fast only
 -- because those rows were still in the page cache; a full pg_dump for the
 -- off-site backup evicted it and the real cost became visible. Four tests in
--- tests/test_api.py are marked `slow` solely because of this - see TESTING.md.
+-- tests/test_api.py are marked `slow` solely because of this - see docs/testing.md.
 --
 -- WHY (station_id, observed_date) AND NOT (station_id, country_code,
 -- observed_date). A station belongs to exactly one country, so country_code
@@ -45,7 +45,7 @@
 -- (station_id, observed_date, country_code) INCLUDE (delay_minutes,
 -- actual_arrival) is a real question, but it means dropping a 2 GB index that
 -- currently serves 263,000 scans and rebuilding for ~20 minutes if the
--- judgement is wrong. Left as is for now - see TESTING.md.
+-- judgement is wrong. Left as is for now - see docs/testing.md.
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_delay_obs_station_date
     ON delay_observations (station_id, observed_date);

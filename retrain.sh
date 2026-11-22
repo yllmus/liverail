@@ -22,7 +22,7 @@ done
 # and only beyond three and six stops respectively. Those margins are too thin
 # to ship, but they should GROW as history deepens - so this runs weekly and
 # writes the numbers to the same log, and the decision to ship becomes a
-# reading rather than a guess. See DELAY_STRUCTURE.md section 6.
+# reading rather than a guess. See docs/delay-forecasting.md.
 for C in DE HU; do
     timeout 3600 python3 -u delay_forecast.py --country "$C" 2>&1
     echo

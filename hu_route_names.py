@@ -6,8 +6,9 @@ def extract_train_number(trip_short_name):
     Used by poller.py's resolve_trip_id() to join a live vehicle to a
     specific static trips.id row via routes.name, since MAV's own static
     feed has trip_short_name 0/34,349 filled - the number has to come from
-    the live feed's tripShortName instead. See NOTES.md "Live per-train
-    identity" for why route.longName/gtfsId can't be used for this.
+    the live feed's tripShortName instead. route.longName and gtfsId can't be
+    used for this: longName groups many trains together, and gtfsId is
+    internal to MÁV's OTP instance and joins to nothing in the static feed.
     """
     if not trip_short_name:
         return None

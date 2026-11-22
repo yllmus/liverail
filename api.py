@@ -58,20 +58,11 @@ def get_conn():
 
 COUNTRY_ATTRIBUTION = {
     "AT": "Data: ÖBB (data.oebb.at), CC BY 4.0",
-    # PL was a placeholder ("Data: PKP PLK (public sector data), via
-    # mkuran.pl") from launch until 2026-08-20, flagged as unresolved in
-    # NOTES.md. The real terms, fetched from the sources themselves:
-    #   - mkuran.pl licenses the realtime feed this project polls
-    #     (polish_trains/updates.pb) as CC BY 4.0 *plus* PKP PLK's public
-    #     sector terms. CC BY requires crediting the author, which the old
-    #     string did not do at all.
-    #   - the static feed (polish_trains.zip) carries PKP PLK's *and*
-    #     Koleje Mazowieckie's public sector terms; KM was never credited.
-    #   - PKP PLK's own reuse page (bip.plk-sa.pl/ponowne-wykorzystywanie)
-    #     requires stating "dokladnego zrodla, czasu wytworzenia i
-    #     pozyskania informacji" - the exact source AND when the data was
-    #     obtained. That last part is why /live/board returns retrieved_at
-    #     and the frontend renders it next to this text.
+    # PL attribution: mkuran.pl publishes the realtime feed under CC BY 4.0 plus
+    # PKP PLK's public sector terms, and the static feed also carries Koleje
+    # Mazowieckie's terms. PKP PLK requires stating the source and when the data was
+    # obtained, which is why /live/board returns retrieved_at and the frontend
+    # shows it next to this text.
     "PL": (
         "Schedules: PKP Polskie Linie Kolejowe S.A. and Koleje Mazowieckie, "
         "reused as public sector information under Poland's Open Data Act "
@@ -81,16 +72,11 @@ COUNTRY_ATTRIBUTION = {
     "DE": "Data: DELFI e.V., via gtfs.de - schedule CC BY 4.0, realtime CC BY-SA 4.0",
 }
 
-# /routes, /routes/summary, /stations/summary all aggregate over an entire
-# country's delay_observations - for HU (5.66M rows) and PL (8.29M rows)
-# that's genuinely I/O-bound on this box regardless of indexing (confirmed:
-# even a forced index-only scan on a (country_code, route_name) index still
-# took 5.3s, vs 8.3s for the planner's own chosen parallel seq scan - the
-# table just doesn't fit in this box's page cache). These are all
-# "historical reliability" views, not live data, so there's no reason to
-# recompute on every request - cached the same way /live already is, one
-# lock per (kind, country) so concurrent callers share a computation
-# instead of each independently re-running an 8s+ query.
+# /routes, /routes/summary and /stations/summary aggregate a whole country's
+# delay_observations. For HU and PL that is I/O bound however it is indexed (the
+# table does not fit in the page cache), and these are historical views, so they
+# are cached like /live: one lock per (kind, country) lets concurrent callers
+# share one computation.
 _SUMMARY_CACHE = {}  # (kind, country) -> {"data": ..., "expires": epoch}
 _SUMMARY_TTL = 900  # 15min - all-time reliability barely shifts minute to minute
 _SUMMARY_LOCKS = {}
@@ -140,25 +126,20 @@ def _warm_summaries():
                     _cached_summary(kind, country, compute, ttl=_WARM_TTL)
                 except Exception as exc:
                     print(f"summary warm {kind}/{country} failed: {exc}")
-            # Same thread, same one-country-at-a-time reason: the aggregates
-            # behind this cost 49-162s per country (measured). A failure here
-            # must not stop the other countries or the loop - search degrades
-            # to whatever the last successful refresh left behind, which is
-            # still useful.
+            # Each aggregate costs 49-162 s per country, so a failure here must not stop
+            # the other countries or the loop. Search degrades to the last successful
+            # refresh.
             #
-            # Unlike the summaries above, this cache lives in Postgres, not in
-            # this process - so it survives a restart and must NOT be rebuilt
-            # on every one. Without the freshness check, `systemctl restart
-            # trainapi` kicked off ~6 minutes of full-table aggregation on a
-            # single vCPU shared with four pollers, every time.
+            # Unlike the summaries above, this cache lives in Postgres and survives a
+            # restart, so it is rebuilt only when stale. Without the freshness check every
+            # `systemctl restart` started minutes of full-table aggregation.
             try:
                 if _search_index_stale(country):
                     refresh_search_index(country)
             except Exception as exc:
                 print(f"search index refresh {country} failed: {exc}")
-            # Phase 2's distributions. Measured on this box: 459s for AT, the
-            # smallest country - these are percentile aggregates over the whole
-            # archive and they are genuinely expensive. Guarded on a 24h age
+            # The delay distributions are percentile aggregates over the whole
+            # archive and expensive (459 s for AT, the smallest country). Guarded on a 24h age
             # for the same reason search_index is: it lives in Postgres, so a
             # restart must reuse it rather than spend an hour rebuilding what
             # is already there. A day-old delay distribution is not meaningfully
@@ -292,30 +273,19 @@ def refresh_search_index(country):
         cur.close()
         conn.close()
 
-# --- Phase 3: journey planning, Hungary first -------------------------
-# Connection risk needs itineraries with transfers, and this project has never
-# had a route planner of any kind. Rather than write a connection-scan search,
-# MÁV's own OTP endpoint plans for us - the same host the HU poller already
-# polls, so no new dependency and no new failure mode.
+# --- Journey planning ---
+# Connection risk needs itineraries with transfers. Rather than write a
+# connection-scan search, HU asks MÁV's own OTP endpoint (the host the HU poller
+# already uses) and AT asks HAFAS journeys(). PL and DE return an explicit 501:
+# they would need a search over stop_times, and an empty result would suggest
+# the capability is uniform when it is not.
 #
-# Only HU. Checked, not assumed: ÖBB's HAFAS exposes journeys() and could be
-# added as a third one-shot Node script (the established pattern), but DB's
-# HAFAS is dead and mkuran.pl is a data mirror with no planning API, so PL and
-# DE need a connection-scan search over stop_times we already hold. Those are
-# real work; this endpoint returns an explicit 501 for them rather than
-# pretending the capability is uniform.
-#
-# The response shape is OURS, not OTP's, precisely so adding Austria second
-# does not force a rewrite of everything that consumes it.
-#
-# Two HU-specific corrections are applied to every leg, both already solved
-# elsewhere in this codebase and both needed here:
-#   * route.longName is OTP's grouped slash-list ("rjx 60/62/66"), not a route
-#     identifier - confirmed again in a live plan response. clean_route_name()
-#     turns it into this train's own name, exactly as the poller does.
-#   * tripShortName leads with the train's real public number ("62 railjet
-#     xpress"), which extract_train_number() pulls out - so each leg arrives
-#     already joinable to our own history rather than being an opaque OTP id.
+# The response shape is ours, not OTP's, so a second country does not change
+# its consumers. Two corrections apply to every HU leg:
+#   * route.longName is OTP's grouped slash-list, not a route identifier, so
+#     clean_route_name() turns it into this train's own name.
+#   * tripShortName leads with the public train number, which
+#     extract_train_number() pulls out so the leg joins to our own history.
 _PLAN_CACHE = {}
 _PLAN_LOCKS = {}
 _PLAN_TTL = 600          # 10 min: a timetable does not move, delays do
@@ -364,7 +334,7 @@ def _epoch_ms_to_local(ms, country):
 def _normalise_plan(raw, country, cur):
     """OTP's itineraries -> our shape, with transfers made explicit.
 
-    The transfer list is the whole reason this endpoint exists: Phase 4 reads
+    The transfer list is the whole reason this endpoint exists: transfer risk reads
     the buffer between two legs at a shared station, so it is computed here
     once rather than re-derived by every caller.
     """
@@ -389,7 +359,7 @@ def _normalise_plan(raw, country, cur):
                 "route_name": route_name,
                 # The public number, which is what our own history is keyed on
                 # for HU - not OTP's gtfsId, which is internal to their
-                # instance and joins to nothing here (NOTES.md, HU trip_id).
+                # instance and joins to nothing here.
                 "train_number": number,
                 "live_trip_id": trip.get("gtfsId"),
                 "departure_delay_min": (leg.get("departureDelay") or 0) / 60.0,
@@ -418,7 +388,7 @@ def _normalise_plan(raw, country, cur):
                 "feeder_route": a["route_name"], "feeder_number": a["train_number"],
                 "connector_route": b["route_name"], "connector_number": b["train_number"],
                 "_arrive_hm": a.get("arrive_hm"), "_depart_hm": b.get("depart_hm"),
-                # Phase 4. Filled per transfer from the stored distributions;
+                # Filled per transfer from the stored distributions;
                 # carries its own refusal when no rung is deep enough, so a
                 # consumer can never mistake "not computed" for "no risk".
                 "risk": assess_transfer(cur, country, a["to"], buffer_min,
@@ -439,29 +409,20 @@ def _normalise_plan(raw, country, cur):
         })
     return out
 
-# --- Phase 4: transfer probability ------------------------------------
+# --- Transfer probability ---
 # P(make it) = P(feeder delay - connector departure delay <= buffer - MCT).
 #
-# TWO SIMPLIFICATIONS, both the ones the whole industry makes and both stated
-# rather than buried: the feeder and connector delays are treated as
-# independent (they are not - one storm delays both - but the correlation is
-# second-order), and a train's delay at a station is read as its delay there.
+# Two simplifications, both stated: the two delays are treated as independent,
+# and a train's delay at a station is read as its delay there. (The independence
+# assumption turned out to matter; see docs/delay-forecasting.md.)
 #
-# THE DISTRIBUTIONS ARE RECONSTRUCTED FROM STORED QUANTILES, not from raw
-# rows. schema/012 holds p50/p75/p90/p95/worst, so the curve is sampled at
-# those points and interpolated between them. Below p50 it is held flat: the
-# lower tail is not stored, and assuming a train is *at best* its median is
-# the conservative direction - it never inflates the chance of making a
-# connection. This is an approximation of a convolution, at the resolution the
-# stored data actually supports, and it is labelled as one.
+# The distributions are rebuilt from stored quantiles (schema/012: p50, p75,
+# p90, p95), interpolated between them. Below p50 the curve is held flat, which
+# is the conservative direction: it never inflates the chance of a connection.
 #
-# MINIMUM INTERCHANGE TIME HAS NO SOURCE for three of the four countries -
-# checked directly: transfers.txt is absent from MÁV's, ÖBB's and both gtfs.de
-# feeds. Only PL publishes one and it was skipped at import. So the figure
-# below is an ASSUMPTION, is returned as one, and is deliberately not dressed
-# up as data. AT ships pathways.txt, which could yield real walking times for
-# that country alone; PL's transfers.txt could be imported. Both are follow-on
-# work, not guesses to make here.
+# Minimum interchange time has no source for three of the four countries
+# (transfers.txt is absent from the MÁV, ÖBB and gtfs.de feeds), so the figure
+# below is an assumption, is returned as one, and is not presented as data.
 _MCT_DEFAULT_MIN = 5
 _MCT_LARGE_STATION_MIN = 10
 # Above this many recorded observations a station is treated as "large" and
@@ -475,17 +436,11 @@ def _interchange_minutes(station_samples):
 
 def _quantile_curve(row_map):
     """(quantile, delay) points from a stored distribution row, ascending."""
-    # `worst` is deliberately NOT a point on this curve. It is a maximum, not
-    # a percentile: at one AT station it is 106 minutes out of 14,175
-    # observations, i.e. a 1-in-14,175 event. Treating it as the 100th
-    # percentile and interpolating from p95 handed roughly 4% of the
-    # probability mass to near-worst delays, which pinned every buffer from 8
-    # to 40 minutes at the same 0.96 - visibly wrong, since a 40-minute buffer
-    # is plainly safer than an 8-minute one.
-    #
-    # The curve therefore stops at p95 and is held flat above it. That leaves
-    # the top 5% unmodelled rather than modelled badly, so the probability is
-    # capped and reported as such instead of being quietly optimistic.
+    # `worst` is a maximum, not a percentile (at one AT station it was 106 minutes
+    # out of 14,175 observations). Interpolating from p95 to it handed about 4% of
+    # the mass to near-worst delays and pinned every buffer from 8 to 40 minutes at
+    # 0.96. The curve therefore stops at p95 and is held flat above it. The top 5%
+    # is left unmodelled, and the probability is capped and reported as such.
     pts = []
     for q, key in ((0.50, "p50"), (0.75, "p75"), (0.90, "p90"), (0.95, "p95")):
         v = row_map.get(key)
@@ -663,20 +618,14 @@ def resolve_station_anywhere(cur, name):
         LIMIT 1
     """, (candidates, candidates))
     exact = cur.fetchone()
-    # NOT "return exact if exact" - an exact match can be the worst answer
-    # available. DE's import contains a station literally named "Bohumin",
-    # ASCII and with zero observations, while PL holds the same station as
-    # "Bohumín" with 19,244. Taking the exact hit blocked the good one and
-    # reported "no data" for a station we have thousands of records for. Both
-    # routes are tried and depth decides.
+    # Do not return an exact match immediately: it can be the worst answer. DE has
+    # a station literally named "Bohumin" with no observations, while PL holds
+    # "Bohumín" with 19,244. Try both routes and let observation depth decide.
     #
-    # Fall back to the folded form. HAFAS returns ASCII-stripped names for
-    # stations outside Austria - "Bohumin" for "Bohumín", "Krakow" for
-    # "Kraków" - so an exact match cannot find them however many spelling
-    # variants it tries. search_index already stores exactly this folding for
-    # the typo-tolerant search, trigram-indexed, with an observation count to
-    # rank by: PL's Bohumín folds to "bohumin" and carries 19,244
-    # observations, while AT's and DE's copies of the same station carry none.
+    # Fall back to the folded form: HAFAS returns ASCII-stripped names for stations
+    # outside Austria ("Krakow" for "Kraków"), so no spelling variant can match
+    # them. search_index already stores that folding, trigram-indexed, with an
+    # observation count to rank by.
     folded = normalize_search_text(name)
     if not folded:
         return exact
@@ -833,19 +782,13 @@ def assess_transfer(cur, country, station_name, buffer_min,
         "cancellation_rate": feeder.get("cancellation_rate"),
     }
 
-# When a change is tight, a warning on its own is not actionable - the useful
-# move is to offer the next train that also reaches the destination, with its
-# own risk figure, so the rider can decide rather than just worry.
+# When a change is tight, a warning alone is not actionable, so offer the next
+# train that also reaches the destination, with its own risk figure.
 #
-# Only the LATER CONNECTOR is offered, not an earlier feeder. Taking an earlier
-# feeder means changing a leg the rider has already started reasoning about and
-# re-planning everything upstream of it; taking a later connector changes one
-# leg, downstream, and is the decision actually available to someone standing
-# on a platform watching their feeder run late.
-#
-# Answered from our own imported stop_times, which every country now has, so it
-# needs no second call to anybody's planner and works identically for HU, AT
-# and PL.
+# Only the later connector is offered, not an earlier feeder: it changes one
+# leg downstream, which is the decision available to someone on a platform
+# watching their feeder run late. It is answered from our own stop_times, so it
+# needs no call to anyone's planner.
 _SAFER_MAX_OFFERS = 2
 _SAFER_LOOKAHEAD_HOURS = 3
 
@@ -928,30 +871,21 @@ def _attach_safer(cur, country, transfers, dest_name, service_date):
             print(f"safer_connectors failed at {t.get('station')}: {exc}")
             t["alternatives"] = []
 
-# --- Projecting where a running train ends up ---------------------------
-# A train that is late now will not simply stay that late. Measured on 64,095
-# fresh adjacent-stop segments, delay moves in a consistent direction that
-# depends on how late the train already is:
+# --- Projecting where a running train ends up ---
+# A late train does not stay that late. Over 64,095 fresh adjacent-stop
+# segments, delay change per stop depends on how late the train already is:
 #
-#     already      change per stop
-#     early           +0.340   (bleeds fastest - furthest from its padding)
-#     0-1 min         +0.096
-#     1-3 min         -0.158   <- flips here
-#     3-10 min        -0.201
-#     10-30 min       -0.199
-#     30+ min         -0.780
+#     early        +0.340     0-1 min   +0.096     1-3 min   -0.158 (flips)
+#     3-10 min     -0.201     10-30     -0.199     30+       -0.780
 #
-# So small delays compound and large ones are absorbed, which is timetable
-# padding doing its job: a late train has slack to reclaim, an on-time train
-# has none. Carrying the current delay forward unchanged - the obvious
-# projection - is therefore wrong in a predictable direction.
+# Small delays grow and large ones are absorbed, which is timetable padding at
+# work, so carrying the current delay forward unchanged is wrong in a
+# predictable direction.
 #
-# GERMANY ONLY, and that is a data limit rather than a choice. Deriving a rate
-# needs the same train observed at CONSECUTIVE stops close together in time,
-# and HU, AT and PL have zero such segments: Poland records one stop per poll,
-# Austria resolves stop positions for a fifth of its trains, Hungary for under
-# half. Rather than borrow Germany's numbers for networks that may behave
-# nothing like it, the other three simply do not get a projection.
+# Germany only, because of the data: a rate needs the same train at consecutive
+# stops close in time, and HU, AT and PL have almost no such segments. Rather
+# than borrow Germany's numbers for networks that may behave differently, the
+# other three get no projection.
 _RECOVERY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recovery_rates.json")
 _RECOVERY_RATES = None
 
@@ -987,21 +921,14 @@ def project_arrival_delay(country, current_delay, stops_remaining):
     return round(d, 1)
 
 
-# --- Journey reliability: which departure should I actually take? --------
-# The planner returns several itineraries and they are ordered by time, which
-# is the only thing a timetable knows. What a rider wants is which one is
-# likely to WORK. Every leg's history is already in delay_distribution, so
-# this attaches it.
+# --- Journey reliability: which departure should I take? ---
+# The planner orders itineraries by time. A rider wants the one likely to work,
+# so each leg's history from delay_distribution is attached. Two figures:
+#   expected_delay_min  the median outcome
+#   on_time_chance      P(within ON_TIME_MIN of schedule)
 #
-# Two figures, because they answer different questions:
-#   expected_delay_min - the median outcome, "you will probably arrive N late"
-#   on_time_chance     - P(within ON_TIME_MIN of schedule), which is what a
-#                        person actually means by "is this train reliable"
-#
-# The final leg's arrival is what matters for the journey; intermediate legs
-# matter only through the transfers, which /transfer/risk already scores. So
-# the arrival estimate is taken from the last leg and the transfer risks are
-# multiplied in - a journey you cannot complete is not an on-time journey.
+# The final leg decides the arrival, and the transfer risks from /transfer/risk
+# are multiplied in, because a journey you cannot complete is not on time.
 ON_TIME_MIN = 5.0
 RELIABILITY_MIN_DAYS = 5
 
@@ -1103,7 +1030,7 @@ def journey_reliability(cur, country, itinerary):
 def get_transfer_risk(country: str = "HU", station: str = "", buffer_min: float = 0,
                       feeder_route: str = "", connector_route: str = "",
                       min_sample: int = None):
-    """Odds of making one transfer. Phase 4."""
+    """Odds of making one transfer."""
     country = country.upper()
     if not station:
         raise HTTPException(status_code=400, detail="station is required")
@@ -1507,7 +1434,7 @@ def get_plan(country: str = "HU", origin: str = "", destination: str = "",
         cur.close()
         conn.close()
 
-# --- Phase 2: precomputed delay distributions -------------------------
+# --- Precomputed delay distributions -------------------------
 # See schema/012_delay_distribution.sql for the full reasoning. Short version:
 # connection risk needs delay DISTRIBUTIONS, not averages, and computing a
 # percentile over 15.8M rows inside a request is exactly how /routes/summary
@@ -1523,7 +1450,7 @@ _DIST_MIN_STORED = 3
 
 # One statement per ladder rung. Kept as (scope, key-expression, group-by)
 # rather than three near-identical blocks so a fourth rung is a tuple, not a
-# copy-paste - the mistake the poller units made twice (see NOTES.md).
+# copy-paste.
 _DIST_RUNGS = (
     ("trip",    "o.trip_id::text", "o.trip_id, o.station_id", "AND o.trip_id IS NOT NULL"),
     ("route",   "o.route_name",    "o.route_name, o.station_id", "AND o.route_name IS NOT NULL"),
@@ -1612,7 +1539,7 @@ def refresh_delay_distribution(country):
         cur.execute("DELETE FROM delay_distribution WHERE country_code = %s", (country,))
         for scope, key_expr, group_by, extra_where in _DIST_RUNGS:
             # percentile_cont ignores NULLs, so cancelled rows (delay_minutes
-            # NULL by Phase 1's design) correctly do not drag the percentiles
+            # is NULL for them by design) correctly do not drag the percentiles
             # toward zero - they are counted in cancellation_rate instead.
             cur.execute(f"""
                 INSERT INTO delay_distribution
@@ -1687,7 +1614,7 @@ def get_distribution(country: str = "HU", station: str = "", trip_id: int = None
                      route_name: str = "", min_sample: int = None):
     """The delay distribution at one station, with its provenance.
 
-    Phase 4 (transfer probability) consumes this; it is exposed on its own so
+    Transfer probability consumes this; it is exposed on its own so
     the numbers behind a risk figure can be inspected rather than taken on
     trust.
     """
@@ -1758,23 +1685,15 @@ def search(q: str, country: str = "HU", limit: int = 10, kind: str = None,
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
-        # word_similarity(), not similarity(): plain similarity() normalises
-        # over the WHOLE target string, so a short needle against a long name
-        # scores terribly - searching AT for "Wien" scored 0.125 against
-        # "Wien Hauptbahnhof" and returned Gratwein-Gratkorn instead.
-        # word_similarity() compares the needle against the best-matching
-        # extent of the target, so "Wien" scores ~1.0 there. similarity() is
-        # kept as a GREATEST arm because it still wins for a needle that
-        # spans several words ("Warszawa Centr").
+        # word_similarity(), not similarity(): similarity() normalises over the whole
+        # target, so "Wien" scored 0.125 against "Wien Hauptbahnhof" and returned
+        # Gratwein-Gratkorn. similarity() stays as a GREATEST arm because it wins for
+        # multi-word needles ("Warszawa Centr").
         #
-        # The popularity term is what makes the ranking usable rather than
-        # merely correct. Measured before it existed: "Munchen" ranked
-        # "Munchhausen" (0 observations) above "München Hbf" (11,674) because
-        # it scored 0.429 vs 0.333. A rider typing a misspelt city name wants
-        # the busy station. ln() rather than the raw count so HU's S70
-        # (97,441 rows) does not simply dominate every query; capped at 1.0
-        # and weighted 0.25 so popularity can break a near-tie but never
-        # outrank a genuinely better textual match.
+        # The popularity term makes the ranking usable: "Munchen" ranked "Munchhausen"
+        # (0 observations) above "München Hbf" (11,674). ln() stops one huge station
+        # dominating every query, and the cap and 0.25 weight let popularity break a
+        # near-tie but never outrank a better textual match.
         cur.execute("""
             SELECT kind, name, display_name, observations, country_code,
                    GREATEST(
@@ -2157,17 +2076,12 @@ def _fmt_time(sec):
 _LIVE_CACHE = {}  # country_code -> {"data": [...], "expires": epoch}
 
 def _live_result(rows, stop_key):
-    # headsign/lat/lon are populated for AT (HAFAS radar's direction/location,
-    # both confirmed ~100% filled in real data) and headsign-only for PL (via
-    # the trips.headsign static join in resolve_delays); DE's underlying rows
-    # carry neither (no headsign in gtfs.de's static feed) so .get() falls
-    # through to None for it, same as before this existed.
+    # headsign, lat and lon are filled for AT, headsign only for PL, and neither
+    # for DE, where .get() falls through to None.
     #
-    # position_source distinguishes AT's real GPS ("live") from PL/DE's
-    # schedule-interpolated marker ("estimated") - see resolve_delays() in
-    # poland_poller.py/germany_poller.py and PLAN.md for why no live GPS
-    # exists for either country. Never silently blend the two - a consumer
-    # must always be able to tell which kind of position a row holds.
+    # position_source separates AT's real GPS ("live") from PL and DE's
+    # schedule-interpolated marker ("estimated"). A consumer must always be able to
+    # tell which kind of position a row holds.
     return [
         {
             "route_name": row["route_name"],
@@ -2177,8 +2091,8 @@ def _live_result(rows, stop_key):
             # specific train, passed through opaquely so /train/{country}/{id}
             # can look the same train up again. Deliberately NOT normalized
             # into a shared scheme - AT's is a HAFAS composite key, PL/DE's is
-            # a GTFS trip id, and pretending they're interchangeable is the
-            # exact mistake documented in NOTES.md's per-train identity note.
+            # a GTFS trip id, and pretending they're interchangeable would
+            # be a mistake.
             "train_id": row.get("live_trip_id") or row.get("gtfs_trip_id"),
             "current_stop": row[stop_key],
             "delay_minutes": row["delay_minutes"],
@@ -2323,7 +2237,7 @@ def _display_stop(mapping, raw, country):
     return mapping.get(raw) or clean_display_name(raw, country) or raw
 
 # routes.name (short code) -> routes.long_name (friendly corridor/operator
-# name), for the raw AT/PL line codes item 7 flags. Same cache shape/TTL as
+# name), for the raw AT/PL line codes. Same cache shape/TTL as
 # _display_map. DE's routes.long_name is confirmed 0/1061 filled (gtfs.de's
 # two static feeds simply don't carry it - see schema/004_route_long_name.sql)
 # so this mapping is legitimately empty for DE and every route falls through
@@ -2342,7 +2256,7 @@ def _route_display_map(country):
         # (confirmed: 10 PL / 55 AT / 187 DE names each cover multiple route
         # rows - direction/branch variants sharing one line code). Rather
         # than guess which is "the" long name, DISTINCT ON picks one
-        # deterministically (lowest id) per item 7's rule: the raw code stays
+        # deterministically (lowest id): the raw code stays
         # authoritative everywhere this is used, the friendly name is best-
         # effort supplementary context, never a replacement.
         cur.execute("""
@@ -2352,17 +2266,10 @@ def _route_display_map(country):
         """, (country,))
         mapping = dict(cur.fetchall())
         if country == "AT":
-            # AT needs a second, different join, and PL/DE must not use it.
-            # AT's *live* route_name is a train identity ("NJ 456", "RJ 215"),
-            # not a line code - confirmed 0/40 live names match routes.name
-            # ("REX81", "S3") because they're separate namespaces, so the
-            # lookup above resolves nothing at all for AT's live board. The
-            # trip_short_name column imported for item 4's identity work
-            # bridges them: it holds exactly those live-style train
-            # identities and joins to a route. Ambiguous identities (one
-            # train number reaching corridors that disagree - 263/7982,
-            # 3.3%) are dropped rather than guessed, per item 7's "where
-            # ambiguous, keep the raw code" rule.
+            # AT needs a second join, and PL/DE must not use it. AT's live route_name is a
+            # train identity ("NJ 456"), not a line code, so it never matches routes.name
+            # ("REX81"). trips.trip_short_name holds those identities and bridges them.
+            # Ambiguous identities (263 of 7,982) are dropped rather than guessed.
             cur.execute("""
                 SELECT tsn, MIN(long_name) FROM (
                     SELECT t.trip_short_name AS tsn, r.long_name
@@ -2517,9 +2424,8 @@ def get_live_positions(country: str = "HU"):
 @app.get("/live/worst")
 def get_live_worst(country: str = "HU", kind: str = "route", limit: int = 10):
     """"Worst right now" - ranked by *current* delay, not the Rankings tab's
-    historical reliability (see /routes/summary, /stations/summary). Item 6
-    of the 2026-08-20 worklist: no rolling-window query existed for this at
-    all before, and the frontend's Rankings tab/footer said so explicitly.
+    historical reliability (see /routes/summary, /stations/summary). Unlike those, this
+    uses a rolling window.
 
     Deliberately reuses the same get_live(country) snapshot /live/board
     already fetches (same cache, same TTL) rather than a new fetch or a DB
@@ -2709,47 +2615,28 @@ def health():
     doc["age_minutes"] = age_min
     return doc
 
-# --- One train's full journey -----------------------------------------
-# /train/{country}/{id} is what turns this from a delay-statistics site into
-# an actual train tracker: given one train, where is it now and what is its
-# whole remaining timetable, stop by stop, scheduled vs. expected.
+# --- One train's full journey ---
+# /train/{country}/{id} turns the delay statistics into a tracker: where one
+# train is now and its remaining timetable. Each country answers differently:
+#   HU  the OTP response already carries the full stoptimes array.
+#   AT  radar() returns only about 4 upcoming stopovers, so a second HAFAS call,
+#       client.trip() (hafas/trip.js), fetches the whole journey.
+#   PL  the feed has a stop_time_update per stop but only stop_sequence and an
+#       absolute time, so names and scheduled times come from our own
+#       stop_times and stations, as in resolve_delays().
+#   DE  the feed has stop_id, delay and time per stop, but stop_ids are
+#       platform-level children, so they go through load_parent_map().
 #
-# Every country can answer this, but no two answer it the same way, and the
-# differences are real rather than cosmetic (checked against each live feed
-# directly before any of this was written):
-#   HU  - the OTP GraphQL response already carries the full stoptimes array,
-#         so get_live_hu() has been building it all along; this just finds
-#         the right train in that snapshot. No extra network call.
-#   AT  - radar() returns only ~4 upcoming stopovers, so the full journey
-#         needs a second HAFAS call, client.trip(), one train at a time
-#         (hafas/trip.js). Real GPS position and platform numbers included.
-#   PL  - the GTFS-RT feed carries every stop_time_update for the trip (mean
-#         17, max 77), but with no stop_id, no name, and no delay - only
-#         stop_sequence + an absolute timestamp. Names and scheduled times
-#         come from our own stop_times/stations tables, which is exactly
-#         what poland_poller's resolve_delays() already does for the current
-#         stop; this does it for all of them.
-#   DE   - the feed carries stop_id, delay AND time per stop, so the journey
-#         needs no schedule join at all - but its stop_ids are always
-#         platform-level children, so they go through the same
-#         load_parent_map() translation germany_poller already depends on.
-#
-# The per-country fetch is cheap enough to do on demand (measured: PL 0.5s,
-# DE 0.8s for a full raw feed fetch+parse - the expensive part of /live was
-# never the feed, it was the ~22k-row DB join, which this does for one trip
-# only). So there is no new cache here.
+# A raw feed fetch is cheap (PL 0.5 s, DE 0.8 s). The expensive part of /live
+# was the 22k-row DB join, which this does for one trip, so there is no cache.
 _JOURNEY_ROUTE_STATS_TTL = 900
 
-# A delay this large is not a delay, it's a schedule-version mismatch. PL's
-# live feed and our imported static snapshot mostly agree on stop_sequence
-# numbering (measured: 399/400 sampled trips have every feed sequence inside
-# the static trip's own range), but a handful of trips - international ones
-# especially - are renumbered upstream, so matching sequence-to-sequence pairs
-# the wrong stops and yields ~20-hour "delays". One real example:
-# PLK_LEO_2026_516260411, numbered 15-31 in the feed and 0-16 in stop_times.
-# Rather than show a rider "1191 minutes late", these are reported as unknown -
-# the same graceful-skip-rather-than-guess convention the pollers use for rows
-# they can't resolve.
+# A delay this large is a schedule-version mismatch, not a delay. A few PL
+# trips, international ones especially, are renumbered upstream, so matching
+# sequence to sequence pairs the wrong stops and yields roughly 20-hour
+# "delays" (PLK_LEO_2026_516260411 is 15-31 in the feed and 0-16 in
+# stop_times). They are reported as unknown instead of showing "1191 minutes
+# late".
 _MAX_PLAUSIBLE_DELAY_MIN = 720
 
 def _plausible_delay(delay_min):
@@ -3042,28 +2929,19 @@ _JOURNEY_PROVIDERS = {
     "DE": _journey_de,
 }
 
-# --- One train's own history ------------------------------------------
-# The single feature the competitive review rated highest: "is this specific
-# train usually late", not "is this route usually late". Everything needed
-# has been accumulating in delay_observations.trip_id since the per-train
-# identity work; nothing here needs a new data source.
+# --- One train's own history ---
+# "Is this specific train usually late", not "is this route". It reads
+# delay_observations.trip_id, so it needs no new data source.
 #
-# What each country can actually answer differs a great deal, and the answer
-# is returned alongside the data rather than papered over (see identity_basis
-# and history_since below). Measured 2026-08-21:
-#   DE  100% of rows carry a real trips.id, every day since 2026-08-01.
-#   PL  100% likewise (its lower all-time share is early-August bulk rows
-#       written before the dedup fix, not a resolution gap).
-#   HU  0% until 2026-08-20, then 23% -> 48% as the train-number resolver
-#       landed. Real, but only days deep.
-#   AT  0% until 2026-08-21, now ~54%. Days deep at best.
-# HU and AT also cannot be looked up by their live id at all: HU's is an
-# OTP-internal gtfsId and AT's a HAFAS composite key, neither of which is
-# stable across days or joinable to the static schedule (NOTES.md, "Live
-# per-train identity"). For those two the train is resolved the same way
-# their pollers resolve it - by the train's public number - so history keyed
-# on trips.id is still reachable. Where even that fails, live_trip_id gives
-# same-day continuity only, and the response says so.
+# What each country can answer differs, so the answer comes back with the data
+# (see identity_basis and history_since):
+#   DE and PL  every row has a real trips.id.
+#   HU and AT  only since the train-number resolvers landed (about 48% and 54%).
+#
+# HU's live id is OTP-internal and AT's is a HAFAS composite key. Neither is
+# stable across days or joinable to the schedule, so both are resolved by the
+# train's public number, as their pollers do. Where even that fails,
+# live_trip_id gives same-day continuity only, and the response says so.
 
 _HISTORY_MAX_DAYS = 365
 
@@ -3213,32 +3091,21 @@ def get_train_history(country: str, train_id: str, days: int = 30):
         "attribution": COUNTRY_ATTRIBUTION.get(country),
     }
 
-# --- Phase 2: how this train runs at each stop -------------------------
-# schema/008_stop_identity.sql built idx_delay_obs_trip_stop for exactly this
-# read: "every observation of this trip at this stop". /history answers "is
-# this train usually late"; this answers "*where* does it lose the time", which
-# is the question a transfer depends on - and the input connection risk needs.
+# --- How this train runs at each stop ---
+# Reads idx_delay_obs_trip_stop (schema/008): every observation of one trip at
+# one stop. /history says whether a train is usually late. This says where it
+# loses the time, which is what a transfer depends on.
 #
-# Three honesty constraints, all of them real and all surfaced rather than
-# hidden behind a plausible-looking average:
-#
-#   SAMPLE DEPTH. stop_sequence has only been written since 2026-08-21, so
-#   every stop here starts at n=1. A median over one run is not a median. Each
-#   stop carries its own observation and day counts, and `sufficient_sample`
-#   marks the ones that clear _MIN_STOP_SAMPLE - NOTES.md puts the bar for
-#   connection risk at ~20 days, and nothing here pretends to have reached it.
-#
-#   AT HAS NO ARRIVAL DELAYS AT ALL. Not a bug and not a thin sample: ÖBB's
-#   radar() never populates arrivalDelay (0/314 measured), so the poller
-#   correctly writes NULL rather than copying the departure figure. Reporting
-#   an empty arrival column without saying why would read as "this train is
-#   never late arriving". `arrival_available` says it outright.
-#
-#   NO STOP IDENTITY WITHOUT A RESOLVED TRIP. Phase 1 writes stop_sequence only
-#   when trip_id resolved, so a train falling back to live_trip_id has no stop
-#   rows whatsoever. That returns an explicit reason, not an empty list that
-#   looks like "this train calls nowhere".
-_MIN_STOP_SAMPLE = 20  # days; see NOTES.md "Next features" on history depth
+# Three things are surfaced, not hidden behind an average:
+#   Sample depth. stop_sequence has only been written since 2026-08-21, so each
+#   stop has its own observation and day counts, and `sufficient_sample` marks
+#   those that clear _MIN_STOP_SAMPLE.
+#   AT has no arrival delays. radar() never sets arrivalDelay, so the poller
+#   writes NULL, and `arrival_available` says so, since an empty column would
+#   read as "never late arriving".
+#   No stop identity without a resolved trip. A train that fell back to
+#   live_trip_id has no stop rows, which returns an explicit reason.
+_MIN_STOP_SAMPLE = 20  # days of history before a per-stop median means anything
 
 @app.get("/train/{country}/{train_id:path}/stops")
 def get_train_stops(country: str, train_id: str, days: int = 30):
@@ -3403,7 +3270,7 @@ def _train_route_stats(route_name, country):
     The whole point of pairing a tracker with this project's data: not just
     "your train is 12 minutes late" but "and this route runs late 40% of the
     time". Cached per route because it's the same whole-country-scan class of
-    query as /route/{name}/stats (see the Compare bugfix in NOTES.md)."""
+    query as /route/{name}/stats."""
     if not route_name:
         return None
     def compute():
@@ -3501,22 +3368,14 @@ def _operators_summary_query(country):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
-        # routes.agency_name is the operator. Joined through route_name rather
-        # than trip_id because trip_id is only populated for a fraction of
-        # HU/AT rows - route_name is on every row in every country, so this
-        # covers the whole archive rather than only the resolvable slice.
-        # DISTINCT ON picks one agency per route name: a name can legitimately
-        # map to several route rows (direction/branch variants), the same
-        # ambiguity _route_display_map already resolves this way.
+        # routes.agency_name is the operator. It is joined through route_name, not
+        # trip_id, because route_name is on every row in every country and trip_id is
+        # not. DISTINCT ON picks one agency per name, since a name can map to several
+        # route rows (direction and branch variants).
         #
-        # AT needs a different join and produced zero rows without it: what its
-        # poller writes as route_name is a train identity ("RJ 61", "NJ 456"),
-        # not a line code, and those are separate namespaces from routes.name
-        # ("REX81", "S3") - the same mismatch _route_display_map documents.
-        # trips.trip_short_name holds exactly those train identities and joins
-        # to a route, so it is the bridge. Ambiguous identities (one number
-        # reaching routes that disagree on operator) are dropped rather than
-        # guessed, per the same rule used for route labels.
+        # AT needs a different join and returned zero rows without it: its route_name
+        # is a train identity ("RJ 61"), not a line code, so trips.trip_short_name
+        # bridges the two. Ambiguous identities are dropped rather than guessed.
         if country == "AT":
             route_agency = """
                 SELECT tsn AS name, MIN(agency_name) AS agency_name FROM (
@@ -3606,22 +3465,15 @@ def _csv_response(rows, filename):
         headers={"Content-Disposition": f'attachment; filename="{filename}.csv"'},
     )
 
-# --- SEO / growth surface ---------------------------------------------
-# Everything above this line is the JSON API the LiveRail SPA (index.html)
-# consumes - a single client-rendered page with no per-entity URLs, which
-# search engines have nothing to index and nothing distinct to rank. These
-# endpoints render plain server-side HTML per station/route so each one is
-# a real, crawlable, shareable URL - the foundation SEO/social growth needs
-# (see MONETIZATION_READINESS.md). Deliberately minimal (no JS, no build
-# step, inline styling) - this is a landing page for search engines and
-# link previews, not a UI; the "Open the live map" link sends a real human
-# straight into the interactive SPA.
+# --- SEO surface ---
+# Everything above is the JSON API behind index.html, a single client-rendered
+# page with no per-entity URLs for search engines to index. These endpoints
+# render plain server-side HTML per station and route, so each has a crawlable,
+# shareable URL. They are deliberately minimal (no JS, inline styling) and link
+# into the SPA.
 #
-# Absolute URLs (canonical/OG/sitemap) are built from the incoming
-# request's own Host header rather than a hardcoded domain - this project
-# already broke production once by hardcoding a host that changed (see
-# NOTES.md's "Outage found and fixed 2026-08-02"); this endpoint set
-# deliberately doesn't repeat that.
+# Absolute URLs (canonical, OG, sitemap) come from the request's Host header,
+# not a hardcoded domain, since a hardcoded host once broke production.
 
 _COUNTRY_NAMES = {"HU": "Hungary", "AT": "Austria", "PL": "Poland", "DE": "Germany"}
 
@@ -3754,24 +3606,16 @@ def seo_route_page(request: Request, country: str, name: str):
 
 @app.get("/sitemap.xml")
 def sitemap(request: Request):
-    # Now reads search_index, which carries a per-name observation count
-    # (see schema/006_search_index.sql) - so this both avoids the
-    # whole-table-scan timeout the previous version was written around AND
-    # gets the thin-page filter for free from the same rows.
+    # Reads search_index, which carries a per-name observation count, so this
+    # avoids the whole-table scan and gets the thin-page filter from the same rows.
     #
-    # THIN-PAGE EXCLUSION. Every /t/ page renders an on-time percentage and
-    # an average delay computed from that station's or route's observations.
-    # Below _SEO_MIN_OBSERVATIONS there is no statistic worth reading, and at
-    # zero the page is empty apart from its own title. Measured on the real
-    # data before this filter: of 21,168 station pages the sitemap submitted,
-    # 10,245 had ZERO observations - DE alone contributed 6,467. Submitting
-    # ten thousand near-identical empty pages is the textbook doorway-page
-    # pattern search engines demote an entire domain for, which is a real
-    # risk to the one growth channel this project has.
+    # Thin pages are excluded: below _SEO_MIN_OBSERVATIONS a page has no statistic
+    # worth reading. Before this filter, 10,245 of 21,168 submitted station pages had
+    # zero observations. Thousands of near-identical empty pages is the
+    # doorway-page pattern search engines demote a whole domain for.
     #
-    # The pages themselves are NOT removed or 404'd - a rider following a
-    # link to a quiet halt still gets it, and it still says plainly that
-    # there is little data. They are simply not *submitted* for indexing.
+    # The pages are not removed or 404'd, and say plainly that data is thin. They
+    # are just not submitted for indexing.
     base = _base_url(request)
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -3795,18 +3639,13 @@ def robots_txt(request: Request):
     base = _base_url(request)
     return PlainTextResponse(f"User-agent: *\nAllow: /\nSitemap: {base}/sitemap.xml\n")
 
-# --- Compensation eligibility + claim assist -----------------------------
-# Real feature, not a schema stub: backed by compensation_rules, seeded
-# 2026-08-20 with sourced EU Regulation 2021/782 figures per country (see
-# schema/compensation_rules_seed.sql for the full sourcing). No third-party
-# "AirHelp for trains" service exists in Europe (checked directly, not
-# assumed) - passengers claim straight from the operator - so this doesn't
-# try to be a claims broker. It computes eligibility from a delay already
-# visible in this app, and helps a user assemble what their operator's own
-# claim form asks for. No login, no payment, no data stored - purely
-# computed from parameters the frontend already has in hand (a live board
-# row or a history row), consistent with keeping auth/payments out of this
-# pass entirely.
+# --- Compensation eligibility and claim assist ---
+# Backed by compensation_rules, seeded with sourced EU Regulation 2021/782
+# figures (schema/compensation_rules_seed.sql). No third-party claims service
+# for trains exists in Europe, since passengers claim from the operator, so this
+# is not a broker. It computes eligibility from a delay already visible in the
+# app and helps assemble what the operator's claim form asks for. No login, no
+# payment, nothing stored.
 
 _COUNTRY_CURRENCY = {"HU": "HUF", "AT": "EUR", "DE": "EUR", "PL": "PLN"}
 _COUNTRY_CLAIM_URL = {
@@ -3830,20 +3669,17 @@ def _compensation_lookup(country: str, delay_minutes: float):
     cur.close(); conn.close()
     return row
 
-# Cancellation is not "a very large delay", and the rights differ in kind.
-# Under EU Regulation 2021/782, a cancellation that leaves you 60+ minutes late
-# at your final destination gives a CHOICE that a delay does not:
-#   * a refund within 30 days (full, or the part of the journey not made),
-#     plus return transport to the origin if the cancellation strands you; OR
-#   * re-routing to the destination at the earliest opportunity, at no extra
-#     cost, under comparable conditions.
+# Cancellation is not a very large delay, and the rights differ in kind. Under
+# EU Regulation 2021/782, a cancellation leaving you 60+ minutes late gives a
+# choice a delay does not:
+#   * a refund within 30 days (plus return transport if stranded), or
+#   * re-routing at the earliest opportunity at no extra cost.
 # Compensation on top follows the same 25%/50% scale as a delay.
 #
-# The distinction that matters most, and the reason this cannot just reuse the
-# delay path: refund and re-routing are UNCONDITIONAL, while compensation can
-# be refused for extraordinary circumstances (severe weather, sabotage). A
-# strike is explicitly NOT such a circumstance. So a rider told "no
-# compensation" must still be told they can claim their money back.
+# Refund and re-routing are unconditional, while compensation can be refused
+# for extraordinary circumstances (severe weather, sabotage). A strike is not
+# one. So a rider told "no compensation" must still be told they can claim
+# their money back.
 # Source: https://europa.eu/youreurope/citizens/travel/passenger-rights/rail/index_en.htm
 _CANCELLATION_THRESHOLD_MIN = 60
 _EU_RAIL_RIGHTS_URL = "https://europa.eu/youreurope/citizens/travel/passenger-rights/rail/index_en.htm"
@@ -4031,13 +3867,11 @@ def outbound_click(link_id: int, request: Request):
 # ---------------------------------------------------------------------------
 # Delay alerts (Web Push)
 #
-# No login. A browser's push subscription IS its identity, which is why this
-# works at all on a site with an empty `users` table - see schema/017.
+# No login: a browser's push subscription is its identity (see schema/017).
 #
-# EVERY ONE OF THESE IS A POST, INCLUDING THE ONE THAT ONLY READS. A push
-# endpoint is a capability URL: anyone holding it can send that browser
-# notifications. Putting it in a query string would write it into nginx's
-# access log and every intermediary's, so it travels in a body instead.
+# Every endpoint here is a POST, including the one that only reads. A push
+# endpoint is a capability URL, so putting it in a query string would write it
+# into nginx's access log and every intermediary's.
 # ---------------------------------------------------------------------------
 from pydantic import BaseModel
 from typing import Optional

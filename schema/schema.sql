@@ -6,8 +6,7 @@
 -- started and never captured, which is why the numbered migrations begin at
 -- 002 - there is no 001. The practical consequence: the repo alone could not
 -- rebuild this database. Losing the box AND the dump meant losing the
--- structure too, not just the data. Found while making the project
--- restorable from GitHub; see RESTORE.md.
+-- structure too, not just the data.
 --
 -- RELATIONSHIP TO schema/0NN_*.sql. Those are the historical record of each
 -- change and why it was made - they are worth reading and are NOT superseded.
@@ -20,7 +19,7 @@
 --
 -- Grants are included deliberately: delay_observations and friends are owned
 -- by the postgres superuser, not trainuser, so a restore that skips the GRANT
--- statements comes up with an app that cannot write. See NOTES.md, "Grants".
+-- statements comes up with an app that cannot write.
 --
 -- PostgreSQL database dump
 --

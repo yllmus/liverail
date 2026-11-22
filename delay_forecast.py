@@ -1,6 +1,6 @@
 """Let the model find the patterns, instead of hand-testing one hypothesis at a time.
 
-WHY THIS EXISTS. DELAY_STRUCTURE.md holds five investigations, each of which
+WHY THIS EXISTS. docs/delay-forecasting.md holds five investigations, each of which
 worked the same way: guess a mechanism, write a query, test it. That found real
 things (delay coupling at 4.4x above chance; padding that makes late trains
 recover and early ones bleed) but it does not scale, and it can only ever find
@@ -35,7 +35,7 @@ own journey - the "when will this actually get in" question. The baseline is
 PERSISTENCE: assume the delay it has now is the delay it will have then. That
 is a genuinely hard baseline. An earlier LightGBM attempt at the neighbouring
 one-segment version LOST to it (MAE 0.554 vs 0.494), which is recorded in
-DELAY_STRUCTURE.md and is the reason nothing here is assumed to work until it
+docs/delay-forecasting.md and is the reason nothing here is assumed to work until it
 is measured on held-out days.
 
 LEAKAGE IS THE FAILURE MODE. Every historical statistic is computed on the
@@ -54,7 +54,7 @@ from config import DB_PASSWORD
 
 # Ignore readings this far apart when treating two stops as one journey. A
 # stop's stored delay is only as fresh as the last time it sat in the sampling
-# window, and DELAY_STRUCTURE.md found 26.2% of adjacent pairs were more than
+# window, and docs/delay-forecasting.md found 26.2% of adjacent pairs were more than
 # 15 minutes apart - comparing those measures the poller, not the railway.
 MAX_ABS_DELAY = 720.0        # the same implausible-delay guard used elsewhere
 

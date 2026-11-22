@@ -118,7 +118,7 @@ def test_live_de_mocks_gtfs_rt_fetch(monkeypatch):
 # assert response *shape* and the honesty guarantees rather than specific
 # delay figures, which change every five minutes.
 
-@pytest.mark.slow  # whole-country aggregate; see pytest.ini / TESTING.md
+@pytest.mark.slow  # whole-country aggregate; see pytest.ini / docs/testing.md
 def test_operators_summary_returns_a_ranking_or_says_why_not():
     resp = client.get("/operators/summary?country=DE")
     assert resp.status_code == 200
@@ -129,7 +129,7 @@ def test_operators_summary_returns_a_ranking_or_says_why_not():
         assert row["operator"]
         assert row["total"] >= 20  # the HAVING floor
 
-@pytest.mark.slow  # whole-country aggregate; see pytest.ini / TESTING.md
+@pytest.mark.slow  # whole-country aggregate; see pytest.ini / docs/testing.md
 def test_operators_summary_explains_an_empty_ranking():
     # PL's feed carries no agency_name at all. An empty table must say why -
     # silence would read as "no data yet" for a gap that is permanent.
@@ -139,7 +139,7 @@ def test_operators_summary_explains_an_empty_ranking():
         assert body["meta"]["note"]
         assert "operator names" in body["meta"]["note"]
 
-@pytest.mark.slow  # whole-country aggregate; see pytest.ini / TESTING.md
+@pytest.mark.slow  # whole-country aggregate; see pytest.ini / docs/testing.md
 def test_operators_summary_csv_export():
     resp = client.get("/operators/summary?country=HU&format=csv")
     assert resp.status_code == 200
@@ -147,7 +147,7 @@ def test_operators_summary_csv_export():
     assert "attachment" in resp.headers["content-disposition"]
     assert resp.text.splitlines()[0].startswith("operator,")
 
-@pytest.mark.slow  # whole-country aggregate; see pytest.ini / TESTING.md
+@pytest.mark.slow  # whole-country aggregate; see pytest.ini / docs/testing.md
 def test_routes_summary_csv_matches_the_json_rows():
     # The export must come from the same cached rows the page renders, not a
     # second query that could drift from it.
@@ -176,7 +176,7 @@ def test_station_board_rejects_a_malformed_date():
                    # only, so EXPLAIN shows observed_date as a Filter rather than
                    # an Index Cond: every row for a busy station is heap-fetched
                    # and discarded. Today's date is fast only because those rows
-                   # are still in page cache. Fix is an index - see TESTING.md.
+                   # are still in page cache. Fix is an index - see docs/testing.md.
 def test_station_board_accepts_a_past_date():
     resp = client.get("/station/Budapest-Keleti/board?country=HU&date=2026-08-20")
     assert resp.status_code == 200

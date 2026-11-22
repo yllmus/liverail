@@ -1,9 +1,7 @@
 -- Additive schema for the three monetization paths (affiliate sales,
 -- compensation-claim referral, freemium tracking). Deliberately schema
 -- only - no API endpoints, no auth logic, no payment integration wired up
--- yet (see MONETIZATION_READINESS.md for why that's a separate, later,
--- more carefully-reviewed pass, especially for anything touching
--- passwords/payments). Every table here is new; nothing here alters or
+-- yet; anything touching passwords or payments deserves its own review. Every table here is new; nothing here alters or
 -- reads delay_observations/stations/routes/trips, so this is safe to run
 -- against the live DB with zero risk to existing functionality.
 -- Idempotent: safe to re-run.
@@ -26,8 +24,8 @@ CREATE TABLE IF NOT EXISTS saved_trains (
     country_code TEXT NOT NULL REFERENCES countries(code),
     identifier TEXT NOT NULL,  -- route_name or a train number, not a hard FK -
                                 -- HU/AT don't have a resolvable trip_id for
-                                -- every train (see NOTES.md "Live per-train
-                                -- identity"), so this stays a display string,
+                                -- every train (live feed ids don't join to
+                                -- the static schedule), so this stays a display string,
                                 -- same convention delay_observations.route_name
                                 -- already uses.
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),

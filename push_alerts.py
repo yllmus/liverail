@@ -14,7 +14,7 @@ the CHANGE, not the state:
     delayed    first time it crosses the threshold at all
     worsened   only once it is materially worse than what was last sent
     cancelled  once, and it outranks everything - a cancelled train has no
-               delay figure at all (Phase 1 writes NULL, never 0)
+               delay figure at all (the pollers write NULL, never 0)
     recovered  once, when it drops back under the threshold, so the last
                thing anyone was told is not a delay that no longer exists
 

@@ -32,7 +32,7 @@ COUNTRY_CODE = "DE"
 #
 # 1 was the original behaviour and left Germany with exactly ONE route-station
 # pair holding 14+ days of history. Unbounded fixed the depth and cost 6.1x the
-# writes. See TESTING.md.
+# writes. See docs/deployment.md (storage growth).
 STOPS_PER_POLL = 3
 # Don't write a row for a change smaller than this. Measured on a real day:
 # 22% of all DE rows were sub-minute re-predictions - gtfs.de restating the
@@ -201,8 +201,8 @@ def _interpolate_position(prev_lat, prev_lon, prev_epoch, target_lat, target_lon
     # poller too) rather than adding a new shared module for six lines. No
     # live GPS exists for DE either (gtfs.de's own realtime docs page
     # states its stream is TripUpdates + ServiceAlerts only, and both
-    # HAFAS-based paths into DB were already confirmed dead - see
-    # PLAN.md). Estimates a marker between the previous scheduled stop and
+    # HAFAS-based paths into DB were already confirmed dead, see
+    # docs/data-sources.md). Estimates a marker between the previous scheduled stop and
     # the target one, proportional to elapsed vs scheduled travel time -
     # the same technique Deutsche Bahn's own official "Zugradar" used for
     # years (also not real GPS) before being retired. Callers must label

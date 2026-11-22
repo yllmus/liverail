@@ -1,114 +1,18 @@
-# This repo is the home directory for the Hungarian Train Delay Tracker
-# project, but the home directory also holds unrelated side projects,
-# caches, logs, DB backups, and dotfiles (.ssh, shell
-# history, editor session data, etc). To avoid ever accidentally
-# committing secrets or multi-hundred-MB unrelated data, this .gitignore
-# denies everything by default and explicitly un-ignores only the
-# train-delay-tracker's own source files. New project files need an
-# explicit "!" entry added below before `git add` will pick them up.
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
 
-*
+# Node
+node_modules/
 
-!.gitignore
-!api.py
-!import.py
-!poller.py
-!index.html
-!insights.sql
-!austria_poller.py
-!hafas/
-!hafas/package.json
-!hafas/radar.js
-!requirements.txt
-!tests/
-!tests/fixtures/
-!tests/fixtures/mav_vehicle_positions.json
-!tests/fixtures/oebb_radar.json
-!tests/test_hu_poller.py
-!tests/test_at_poller.py
-!tests/test_api.py
-!poland_poller.py
-!tests/test_pl_poller.py
-!germany_poller.py
-!tests/test_de_poller.py
-!station_names.py
-!import_hu_missing_stations.py
-!refresh_static_feeds.py
-!recovery_rates.json
-!tests/test_station_names.py
-!hu_route_names.py
-!tests/test_hu_route_names.py
-!config.py
-!.env.example
-!schema/
-!schema/monetization_readiness.sql
-!schema/compensation_rules_seed.sql
-!schema/partner_links_seed.sql
-!robots.txt
-!monitor.py
-!trip_resolution.py
-!at_route_names.py
-!tests/test_trip_resolution.py
-!schema/002_service_calendar.sql
-!schema/003_trip_short_name.sql
-!schema/004_route_long_name.sql
-!schema/005_cancellations_platform.sql
-!search_text.py
-!tests/test_search_text.py
-!schema/006_search_index.sql
-# Live and load-bearing since the "Find my train" pass but never allowlisted -
-# /train/AT/{id} calls this, so a fresh clone had a broken AT train page. Same
-# class as the hu_route_names.py omission documented in NOTES.md.
-!hafas/trip.js
-!hafas/journeys.js
-!schema/007_de_station_merge.sql
-!schema/008_stop_identity.sql
-!schema/009_de_station_merge_round2.sql
-!schema/010_poller_dedup_index.sql
-!schema/011_station_board_date_index.sql
-!schema/012_delay_distribution.sql
-!schema/013_service_dates.sql
-!schema/014_delay_mixture.sql
-!schema/015_model_registry.sql
-!schema/016_resolve_history.sql
-!model_loop.py
-!tests/test_model_loop.py
-!transfer_backtest.py
-!pl_planner.py
-!tests/test_pl_planner.py
+# Local config and secrets
+.env
 
-# Disaster recovery (2026-08-22). schema.sql is the generated full structure -
-# the repo previously had no CREATE TABLE for the six core tables at all.
-# deploy/ is the machine configuration that NOTES.md had always described as
-# "not tracked in this git repo"; without it the code alone cannot be run.
-!analysis/
-!analysis/*.py
-!pytest.ini
-!schema/schema.sql
-!deploy/
-!deploy/crontab.txt
-!deploy/systemd/
-!deploy/systemd/*.service
-!deploy/systemd/*.timer
-!deploy/systemd/poller-instances/
-!deploy/systemd/poller-instances/*.conf
-!deploy/nginx/
-!deploy/nginx/default
-!deploy/nginx/ratelimit.conf
-!deploy/logrotate/
-!deploy/logrotate/poller
-# Delay alerts (Web Push), 2026-08-23. Added in the same commit as the files
-# themselves - a denied file is invisible to `git status`, not listed as
-# untracked, which is how three earlier load-bearing files stayed unbacked-up.
-!push_alerts.py
-!sw.js
-!schema/017_push_alerts.sql
-!tests/test_push_alerts.py
-# Transfer-model serving + the weekly retrain, 2026-08-23.
-!transfer_model.py
-!tests/test_transfer_model.py
-!tests/test_model_gate.py
-!retrain.sh
-!delay_forecast.py
-!forecast.py
-!migrate.sh
+# Data and logs
+*.log
+*.dump
+*.sql.gz
+gtfs*/
+backups/

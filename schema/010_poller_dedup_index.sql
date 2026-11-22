@@ -42,7 +42,7 @@
 --
 -- NOT FIXED HERE, deliberately: /station/{name}/board has the same shape of
 -- problem (observed_date filtered but not indexed) and needs a *different*
--- index, led by station_id rather than trip_id. See TESTING.md.
+-- index, led by station_id rather than trip_id. See docs/testing.md.
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_delay_obs_trip_date
     ON delay_observations (trip_id, observed_date, id DESC)

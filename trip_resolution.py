@@ -27,7 +27,7 @@ def local_now(country_code):
 # How close a candidate trip's scheduled time at the observed station has to
 # be to the live observation's estimated scheduled time (now - delay) to be
 # accepted. Looser would start guessing between e.g. the morning and evening
-# runs of the same numbered service; see NOTES.md "Live per-train identity".
+# runs of the same numbered service.
 TRIP_MATCH_TOLERANCE_MIN = 25
 
 

@@ -229,7 +229,7 @@ class Congestion:
 
         THIS IS THE TRAIN-LEVEL VERSION OF CONGESTION, and it exists because
         the hourly aggregate version did not work. An hour-wide mean at a
-        station washes out exactly the effect DELAY_STRUCTURE.md measured: a
+        station washes out exactly the effect docs/delay-forecasting.md measured: a
         specific train handing its delay to a specific later train 10-75
         minutes behind it, at 4.4x the rate chance produces. The published
         state of the art reaches for the same granularity - "movements within

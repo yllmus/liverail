@@ -2,7 +2,10 @@ fastapi
 uvicorn
 psycopg2-binary
 pandas
+numpy
+lightgbm
 requests
+pywebpush
+gtfs-realtime-bindings
 pytest
 httpx
-gtfs-realtime-bindings

@@ -1,17 +1,14 @@
 -- Migration: store GTFS trips.trip_short_name.
 --
--- Why: this reopens per-train identity for Austria, which NOTES.md had
--- written off as structurally impossible. That conclusion rested on ÖBB's
--- live HAFAS line.fahrtNr being 0/652 filled - true, and checked - but the
--- *static* side was never examined. It turns out ÖBB's own GTFS fills
--- trip_short_name for 14690/15165 trips, with values like "RJ 658", "D 1130",
--- in the same shape as the live feed's line.name ("RJX 639", "REX 1822").
--- So there is a train number on both sides after all; it just isn't where
--- the earlier investigation looked.
+-- Why: this makes per-train identity possible for Austria. The live HAFAS
+-- line.fahrtNr is 0/652 filled, so the train number cannot come from there,
+-- but the *static* side has it: ÖBB's own GTFS fills trip_short_name for
+-- 14690/15165 trips, with values like "RJ 658", "D 1130", in the same shape
+-- as the live feed's line.name ("RJX 639", "REX 1822"). So there is a train
+-- number on both sides after all.
 --
--- HU's own trip_short_name is confirmed 0/34349 filled (that part of the
--- earlier finding stands), so HU keeps resolving via routes.name; this column
--- is simply NULL there and costs nothing.
+-- HU's own trip_short_name is 0/34349 filled, so HU keeps resolving via
+-- routes.name; this column is simply NULL there and costs nothing.
 --
 -- Additive and nullable; nothing reads it until a resolver opts in.
 -- Safe to re-run.
