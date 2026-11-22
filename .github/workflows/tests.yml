@@ -1,0 +1,55 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TRAIN_DB_PASSWORD: ci
+      TRAIN_DB_HOST: localhost
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # The same steps as "Running it" in the README: the flattened schema,
+      # the later migrations, the reference data, and the four countries.
+      # There is no observation data, so tests marked real_data skip and say why.
+      - name: Create the database from schema/
+        run: |
+          psql -c "CREATE ROLE trainuser LOGIN PASSWORD 'ci'"
+          psql -c "CREATE DATABASE train_delay_db"
+          psql -q -d train_delay_db -f schema/schema.sql
+          for f in schema/01[0-7]_*.sql; do psql -q -d train_delay_db -f "$f"; done
+          psql -q -d train_delay_db -f schema/compensation_rules_seed.sql -f schema/partner_links_seed.sql
+          psql -q -d train_delay_db -c "INSERT INTO countries (code, name) VALUES
+              ('HU', 'Hungary'), ('AT', 'Austria'), ('PL', 'Poland'), ('DE', 'Germany')"
+          psql -q -d train_delay_db -c "GRANT ALL ON ALL TABLES IN SCHEMA public TO trainuser;
+              GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO trainuser"
+
+      - name: Run every test, including the slow ones
+        run: pytest -m "" -rs
