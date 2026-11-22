@@ -4,7 +4,6 @@ This is the whole safety argument for letting the system retrain itself
 unattended, so the tests that matter are the ones asserting it REFUSES. A gate
 that only ever says yes is not a gate.
 """
-import pytest
 
 from model_loop import (judge, MIN_IMPROVEMENT, TIGHT_MIN_GAIN,
                         TIGHT_TOLERANCE, OVERALL_TOLERANCE, CAL_TOLERANCE)

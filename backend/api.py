@@ -1,9 +1,12 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from html import escape as _esc
 from urllib.parse import quote as _urlquote
 import json
+import math
 import os
 import psycopg2
 import re
@@ -37,7 +40,13 @@ from hu_route_names import clean_route_name, extract_train_number
 from config import DB_CONFIG
 import transfer_model
 
-app = FastAPI()
+@asynccontextmanager
+async def _lifespan(app):
+    _start_warmer()
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -152,7 +161,6 @@ def _warm_summaries():
                 print(f"delay distribution refresh {country} failed: {exc}")
         time.sleep(_WARM_INTERVAL)
 
-@app.on_event("startup")
 def _start_warmer():
     # Not under pytest. Importing this module in a test starts a real
     # TestClient, which fires this startup hook - and the aggregates behind it
@@ -1225,7 +1233,6 @@ def _plan_international(cur, origin, destination, date, time_, n):
         raise HTTPException(status_code=404, detail=(
             "ÖBB's planner does not know one of these stations: "
             f"from={payload.get('fromResolved')!r} to={payload.get('toResolved')!r}"))
-    svc_date = datetime.strptime(date, "%Y-%m-%d").date()
     itineraries = []
     countries_used = set()
     for j in payload.get("journeys") or []:
@@ -1740,7 +1747,7 @@ def search(q: str, country: str = "HU", limit: int = 10, kind: str = None,
         rows = sorted(best.values(),
                       key=lambda r: (-(float(r["score"] or 0)
                                        + min((r["observations"] or 0) and
-                                             __import__("math").log((r["observations"] or 0) + 1) / 14.0, 1.0) * 0.25),
+                                             math.log((r["observations"] or 0) + 1) / 14.0, 1.0) * 0.25),
                                      -(r["observations"] or 0)))[:limit]
     for r in rows:
         r["score"] = round(float(r["score"] or 0), 3)
@@ -2615,8 +2622,8 @@ def health():
     try:
         checked = datetime.fromisoformat(doc["checked_at"])
         age_min = round((datetime.now() - checked).total_seconds() / 60, 1)
-    except Exception:
-        pass
+    except (KeyError, TypeError, ValueError):
+        pass  # no usable timestamp: report the status without an age
     # A stale status file is itself a failure - it means the monitor stopped.
     if age_min is not None and age_min > 60:
         doc = {**doc, "status": "critical",

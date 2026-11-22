@@ -23,6 +23,7 @@ seen in training, this returns None and the caller falls back to the mixture.
 A model that guesses outside its training distribution is worse than the
 analytic fallback, which at least degrades honestly.
 """
+import math
 import os
 import threading
 import time
@@ -126,7 +127,7 @@ def predict(country, station_id, feeder_route, conn_route, buffer_min, when):
         p = m["booster"].predict(np.asarray([row], dtype=np.float32))[0]
     except Exception:
         return None
-    if p != p:                       # NaN
+    if math.isnan(p):
         return None
     # Same ceiling the mixture is held to. The curve is fitted to p95 and the
     # tail above it is unmodelled, so claiming more than 0.95 certainty would

@@ -251,8 +251,6 @@ def run_cycle(country="DE", days=21, limit=400000, permille=60, mct=5.0,
         st_d[r["station_id"]] += [r["feeder_delay"], r["conn_delay"]]
         rt_d[(r["station_id"], r["feeder_route"])].append(r["feeder_delay"])
         rt_d[(r["station_id"], r["conn_route"])].append(r["conn_delay"])
-    q_st = {k: tb.empirical_quantiles(v) for k, v in st_d.items()}
-    q_rt = {k: tb.empirical_quantiles(v) for k, v in rt_d.items()}
     m_st = {k: tb.fit_lognormal_mixture(v) for k, v in st_d.items()
             if len(v) >= tb.MIN_SAMPLES_FOR_FIT}
     m_rt = {k: tb.fit_lognormal_mixture(v) for k, v in rt_d.items()

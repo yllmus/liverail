@@ -4,8 +4,6 @@ The failure this guards against is not a crash - it is a model that answers
 confidently with features it never trained on. So most of these assert that it
 REFUSES rather than that it predicts.
 """
-import json
-import os
 
 import pytest
 
