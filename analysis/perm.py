@@ -3,7 +3,7 @@
 Same pairs, same sample sizes, but B's residuals shuffled across days so any
 true A->B link is destroyed while every other structure is preserved.
 """
-import sys; sys.path.insert(0,'/home/ubuntu')
+import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
 import psycopg2, numpy as np
 from collections import defaultdict
 from config import DB_PASSWORD

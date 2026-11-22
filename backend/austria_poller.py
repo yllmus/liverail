@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import psycopg2
@@ -16,6 +17,9 @@ DB_CONFIG = {
 }
 
 COUNTRY_CODE = "AT"
+# The Node scripts sit next to this file, so they are found from any
+# working directory (the API, the poller and the tests all start elsewhere).
+HAFAS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hafas")
 # Urban transit that HAFAS reports as mode "train". Excluded from a rail
 # tracker - see parse_at_vehicles for the measurement behind this.
 EXCLUDED_PRODUCTS = {"tram", "subway"}
@@ -113,7 +117,7 @@ def hafas_journey_id(trip_id):
 
 def call_radar():
     result = subprocess.run(
-        ["node", "hafas/radar.js"],
+        ["node", os.path.join(HAFAS_DIR, "radar.js")],
         capture_output=True, text=True, timeout=30
     )
     if result.returncode != 0:
@@ -124,12 +128,12 @@ def call_radar():
 def call_trip(trip_id, line_name=None):
     # One train's full journey, for api.py's /train/AT/{id}. Kept here next to
     # call_radar() so both Node subprocess invocations live in one place and
-    # share the same relative-path/timeout convention. radar() alone can't
+    # share the same path and timeout convention. radar() alone can't
     # serve a train tracker: its nextStopovers is bounded by the radar call's
     # own duration window (~4 stops in practice), while trip() returns every
     # stopover from origin to destination.
     result = subprocess.run(
-        ["node", "hafas/trip.js", trip_id, line_name or ""],
+        ["node", os.path.join(HAFAS_DIR, "trip.js"), trip_id, line_name or ""],
         capture_output=True, text=True, timeout=30
     )
     if result.returncode != 0:
@@ -143,7 +147,7 @@ def call_journeys(from_name, to_name, departure_iso=None, results=4):
     # invocations live together. Longer timeout than the others because
     # journeys() resolves two station names before it plans anything.
     result = subprocess.run(
-        ["node", "hafas/journeys.js", from_name, to_name,
+        ["node", os.path.join(HAFAS_DIR, "journeys.js"), from_name, to_name,
          departure_iso or "", str(results)],
         capture_output=True, text=True, timeout=45
     )

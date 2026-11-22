@@ -1,10 +1,10 @@
 import os
 
 # Absolute, derived from this file's own location rather than the process's
-# working directory. The systemd units all set WorkingDirectory=/home/ubuntu
-# so a relative ".env" happened to work, but anything run from elsewhere (a
-# cron entry with a different cwd, a restore on a freshly rebuilt box, a
-# one-off script) would silently fall through to no .env at all.
+# working directory. A relative ".env" works only while every caller starts
+# in this directory; anything run from elsewhere (a cron entry with a
+# different cwd, a restore on a freshly rebuilt box, a one-off script) would
+# silently fall through to no .env at all.
 _ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
 

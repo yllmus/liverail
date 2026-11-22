@@ -85,18 +85,22 @@ Python 3, FastAPI, PostgreSQL (psycopg2), pandas and numpy, LightGBM, a small No
 
 ```bash
 pip install -r requirements.txt
-(cd hafas && npm install)          # Austria only
+(cd backend/hafas && npm install)        # Austria only
 
-cp .env.example .env               # set TRAIN_DB_PASSWORD
+cp backend/.env.example backend/.env     # set TRAIN_DB_PASSWORD
 sudo -u postgres psql -c "CREATE ROLE trainuser LOGIN PASSWORD '<same password>'"
 sudo -u postgres createdb train_delay_db
 sudo -u postgres psql train_delay_db -f schema/schema.sql
 for f in schema/01[0-7]_*.sql; do sudo -u postgres psql train_delay_db -f "$f"; done
+sudo -u postgres psql train_delay_db -c "INSERT INTO countries (code, name) VALUES ('HU', 'Hungary')"
 
+cd backend
 python3 import.py --country HU --gtfs-dir <dir with stops/routes/trips.txt>
-python3 poller.py                  # one poll; austria_poller.py etc. for the others
+python3 poller.py                        # one poll; austria_poller.py etc. for the others
 uvicorn api:app --port 8000
 ```
+
+The API does not serve the frontend. In production Nginx served `web/` and proxied the API paths to port 8000 (`deploy/nginx/default`).
 
 `schema/schema.sql` is the flattened result of migrations `002` to `009`, so a fresh database applies it first and then migrations `010` to `017`, all of which are safe to re-run. The two data repairs (`007`, `009`) only matter for the original production database. Static feeds, per-country import flags and the production setup are in [docs/data-sources.md](docs/data-sources.md) and [docs/deployment.md](docs/deployment.md).
 
@@ -109,16 +113,17 @@ pytest tests/ -m slow              # the whole-country API tests, need a populat
 
 | Path | What is in it |
 |---|---|
-| `poller.py`, `austria_poller.py`, `poland_poller.py`, `germany_poller.py` | One adapter per country |
-| `trip_resolution.py`, `station_names.py`, `hu_route_names.py`, `at_route_names.py` | Shared matching and cleaning logic |
-| `api.py` | FastAPI app: live view, history, search, transfer risk, alerts |
-| `index.html`, `sw.js` | Frontend and service worker |
-| `forecast.py`, `delay_forecast.py`, `transfer_model.py`, `model_loop.py`, `transfer_backtest.py` | Delay forecasting and transfer-risk models |
-| `push_alerts.py`, `monitor.py` | Alert delivery and poller health checks |
-| `import.py`, `refresh_static_feeds.py` | Loading and refreshing GTFS static data |
+| `backend/` | All server code. The modules import each other by name, so services run with this as their working directory. |
+| `backend/poller.py`, `austria_poller.py`, `poland_poller.py`, `germany_poller.py` | One adapter per country |
+| `backend/trip_resolution.py`, `station_names.py`, `hu_route_names.py`, `at_route_names.py` | Shared matching and cleaning logic |
+| `backend/api.py` | FastAPI app: live view, history, search, transfer risk, alerts |
+| `backend/forecast.py`, `delay_forecast.py`, `transfer_model.py`, `model_loop.py`, `transfer_backtest.py` | Delay forecasting and transfer-risk models |
+| `backend/push_alerts.py`, `monitor.py` | Alert delivery and poller health checks |
+| `backend/import.py`, `refresh_static_feeds.py` | Loading and refreshing GTFS static data |
+| `backend/hafas/` | Node scripts for Austrian live data and journey search |
+| `web/` | Frontend (`index.html`) and service worker |
 | `schema/` | Full schema dump and numbered migrations |
-| `hafas/` | Node scripts for Austrian live data and journey search |
-| `deploy/` | systemd units, nginx config, logrotate |
+| `deploy/` | systemd units, nginx config, logrotate, retrain and migration scripts |
 | `analysis/` | One-off investigations into what explains a delay |
 | `tests/` | Unit tests and API tests |
 

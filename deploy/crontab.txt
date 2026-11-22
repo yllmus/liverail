@@ -3,14 +3,14 @@
 # Cron only holds the health checks and the monthly feed refresh.
 
 # Poller health checks: resolve ratio per country, and a deeper pass hourly.
-*/15 * * * * cd /home/ubuntu && /usr/bin/python3 monitor.py >> /home/ubuntu/monitor.log 2>&1
-17 * * * * cd /home/ubuntu && /usr/bin/python3 monitor.py --deep >> /home/ubuntu/monitor.log 2>&1
+*/15 * * * * cd /home/ubuntu/liverail/backend && /usr/bin/python3 monitor.py >> /home/ubuntu/monitor.log 2>&1
+17 * * * * cd /home/ubuntu/liverail/backend && /usr/bin/python3 monitor.py --deep >> /home/ubuntu/monitor.log 2>&1
 
 # Monthly static-GTFS refresh. Schedule feeds drift away from the live ones
 # without any error: Germany once lost almost all of its observations for
 # twelve days because gtfs.de reissued its stop ids and nothing re-imported.
 # monitor.py detects that, and this prevents it. Staggered across three nights
 # because each import takes hours and they must not overlap on a small box.
-30 2 1 * * cd /home/ubuntu && /usr/bin/python3 refresh_static_feeds.py --country AT --write >> /home/ubuntu/refresh_feeds.log 2>&1
-30 2 2 * * cd /home/ubuntu && /usr/bin/python3 refresh_static_feeds.py --country PL --write >> /home/ubuntu/refresh_feeds.log 2>&1
-30 2 3 * * cd /home/ubuntu && /usr/bin/python3 refresh_static_feeds.py --country DE --write >> /home/ubuntu/refresh_feeds.log 2>&1
+30 2 1 * * cd /home/ubuntu/liverail/backend && /usr/bin/python3 refresh_static_feeds.py --country AT --write >> /home/ubuntu/refresh_feeds.log 2>&1
+30 2 2 * * cd /home/ubuntu/liverail/backend && /usr/bin/python3 refresh_static_feeds.py --country PL --write >> /home/ubuntu/refresh_feeds.log 2>&1
+30 2 3 * * cd /home/ubuntu/liverail/backend && /usr/bin/python3 refresh_static_feeds.py --country DE --write >> /home/ubuntu/refresh_feeds.log 2>&1

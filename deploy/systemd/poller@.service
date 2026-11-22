@@ -5,8 +5,8 @@ After=network.target postgresql.service
 [Service]
 Type=oneshot
 User=ubuntu
-WorkingDirectory=/home/ubuntu
+WorkingDirectory=/home/ubuntu/liverail/backend
 EnvironmentFile=/etc/poller-instances/%i.conf
-ExecStart=/usr/bin/python3 /home/ubuntu/${POLLER_SCRIPT}
+ExecStart=/usr/bin/python3 /home/ubuntu/liverail/backend/${POLLER_SCRIPT}
 StandardOutput=append:/home/ubuntu/%i_poller.log
 StandardError=append:/home/ubuntu/%i_poller.log

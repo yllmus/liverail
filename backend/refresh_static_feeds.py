@@ -123,7 +123,7 @@ def fetch(url, dest):
 
 
 def run_import(country, dest, flags):
-    cmd = [sys.executable, os.path.expanduser("~/import.py"),
+    cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "import.py"),
            "--country", country, "--gtfs-dir", os.path.expanduser(f"~/{dest}")] + flags
     print(f"  importing {dest}")
     r = subprocess.run(cmd, capture_output=True, text=True)

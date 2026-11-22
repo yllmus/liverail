@@ -1,4 +1,5 @@
 import csv
+import os
 import time
 import requests
 import psycopg2
@@ -63,7 +64,10 @@ BERLIN_TZ = ZoneInfo("Europe/Berlin")
 # its parent_station before looking it up in `stations`. Built from the
 # same static files import.py imported from, kept on disk after import
 # (same convention as gtfs_at/gtfs_pl not being deleted post-import).
-GTFS_STOPS_FILES = ["gtfs_de_fv/stops.txt", "gtfs_de_rv/stops.txt"]
+# They live in the home directory, where refresh_static_feeds.py extracts
+# them, so the path does not depend on the working directory.
+GTFS_STOPS_FILES = [os.path.expanduser("~/gtfs_de_fv/stops.txt"),
+                    os.path.expanduser("~/gtfs_de_rv/stops.txt")]
 
 def load_parent_map():
     parent_map = {}

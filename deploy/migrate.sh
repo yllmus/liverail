@@ -12,12 +12,16 @@
 # stops first, and the gap is a known handful of poll cycles rather than a
 # silent inconsistency. Expect 30-45 minutes, nearly all of it index rebuilds.
 #
-#   old$  ./migrate.sh freeze
+#   old$  deploy/migrate.sh freeze
 #   (copy the dump across)
-#   new$  ./migrate.sh restore <dump-file>
-#   new$  ./migrate.sh verify <counts-file>
+#   new$  deploy/migrate.sh restore <dump-file>
+#   new$  deploy/migrate.sh verify <counts-file>
+#
+# It runs from backend/, where .env and config.py live, so freeze writes its
+# files there and file arguments are relative to it.
 set -euo pipefail
-cd "$(dirname "$0")"
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+cd "$(dirname "$0")/../backend"
 
 TIMERS="poller@hu.timer poller@at.timer poller@pl.timer poller@de.timer pushalerts.timer retrain.timer"
 STAMP=$(date +%Y%m%d_%H%M%S)
@@ -71,14 +75,14 @@ Copy BOTH of these to the new box, plus .env (which is gitignored and holds
 the database password AND the VAPID keys - regenerating those would invalidate
 every existing push subscription):
 
-    scp $DUMP $DUMP.sha256 counts_$STAMP.json .env user@NEW:~/
+    scp $DUMP $DUMP.sha256 counts_$STAMP.json .env user@NEW:~/liverail/backend/
 
-then on the new box:  ./migrate.sh restore $DUMP
+then on the new box:  deploy/migrate.sh restore $DUMP
 MSG
     ;;
 
 restore)
-    DUMP="${2:?usage: ./migrate.sh restore <dump-file>}"
+    DUMP="${2:?usage: deploy/migrate.sh restore <dump-file>}"
     [ -f "$DUMP.sha256" ] && sha256sum -c "$DUMP.sha256"
     [ -f .env ] || { echo "REFUSING: .env is missing - copy it from the old box first"; exit 1; }
     echo "==> creating role and database if absent"
@@ -98,7 +102,7 @@ restore)
     ;;
 
 verify)
-    OLD="${2:?usage: ./migrate.sh verify <counts-file-from-old-box>}"
+    OLD="${2:?usage: deploy/migrate.sh verify <counts-file-from-old-box>}"
     counts > /tmp/counts_new.json
     python3 - "$OLD" /tmp/counts_new.json <<'PY'
 import json, sys
@@ -129,7 +133,7 @@ start)
     ;;
 
 *)
-    sed -n '2,20p' "$0"
+    sed -n '2,21p' "$SELF"
     exit 1
     ;;
 esac

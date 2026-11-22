@@ -5,7 +5,7 @@ under a different train number a short while later. If real, A's delay should
 predict B's RESIDUAL - B's delay minus B's own typical delay at that stop.
 Correlating raw delays would just rediscover that everything is late at once.
 """
-import sys; sys.path.insert(0,'/home/ubuntu')
+import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
 import psycopg2, numpy as np
 from collections import defaultdict
 from config import DB_PASSWORD

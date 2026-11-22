@@ -13,6 +13,11 @@ node_modules/
 # Data and logs
 *.log
 *.dump
+*.dump.sha256
 *.sql.gz
 gtfs*/
 backups/
+
+# Written at runtime into backend/
+monitor_status.json
+counts_*.json

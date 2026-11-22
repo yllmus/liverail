@@ -8,7 +8,7 @@ Type=oneshot
 # ~/.local site-packages, which root cannot see - the exact failure that broke
 # Poland's first poller run (ModuleNotFoundError on gtfs-realtime-bindings).
 User=ubuntu
-WorkingDirectory=/home/ubuntu
-ExecStart=/usr/bin/python3 /home/ubuntu/push_alerts.py
+WorkingDirectory=/home/ubuntu/liverail/backend
+ExecStart=/usr/bin/python3 /home/ubuntu/liverail/backend/push_alerts.py
 StandardOutput=append:/home/ubuntu/push_alerts.log
 StandardError=append:/home/ubuntu/push_alerts.log
