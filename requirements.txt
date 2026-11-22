@@ -1,11 +1,20 @@
-fastapi
-uvicorn
-psycopg2-binary
-pandas
-numpy
-lightgbm
-requests
-pywebpush
-gtfs-realtime-bindings
-pytest
-httpx
+# Tested on Python 3.12 (Ubuntu 24.04, as in production and CI).
+
+# API and pollers
+fastapi==0.165.0
+uvicorn==0.54.0
+psycopg2-binary==2.9.13
+requests==2.34.2
+gtfs-realtime-bindings==3.0.0
+
+# Imports, forecasting and the transfer-risk model
+pandas==3.1.1
+numpy==2.5.5
+lightgbm==4.7.0
+
+# Delay alerts
+pywebpush==2.5.0
+
+# Tests (httpx2 is what FastAPI's TestClient uses)
+pytest==9.2.0
+httpx2==2.16.2
