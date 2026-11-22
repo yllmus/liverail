@@ -44,7 +44,7 @@ import numpy as np
 import psycopg2
 
 import transfer_backtest as tb
-from config import DB_PASSWORD
+from config import DB_CONFIG
 
 MODEL_DIR = os.path.expanduser("~/models")
 TASK = "transfer_risk"
@@ -79,8 +79,7 @@ MIN_TEST_ROWS = 2000
 
 
 def connect():
-    return psycopg2.connect(dbname="train_delay_db", user="trainuser",
-                            password=DB_PASSWORD, host="localhost")
+    return psycopg2.connect(**DB_CONFIG)
 
 
 def build_features(rows, st_stats, rt_stats, glob, st_counts):

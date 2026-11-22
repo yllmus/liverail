@@ -40,14 +40,7 @@ from datetime import datetime
 import psycopg2
 import requests
 
-from config import DB_PASSWORD
-
-DB_CONFIG = {
-    "dbname": "train_delay_db",
-    "user": "trainuser",
-    "password": DB_PASSWORD,
-    "host": "localhost",
-}
+from config import DB_CONFIG
 
 COUNTRIES = ("HU", "AT", "PL", "DE")
 STATUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor_status.json")

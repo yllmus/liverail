@@ -8,11 +8,11 @@ Correlating raw delays would just rediscover that everything is late at once.
 import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
 import psycopg2, numpy as np
 from collections import defaultdict
-from config import DB_PASSWORD
+from config import DB_CONFIG
 
 COUNTRY=sys.argv[1] if len(sys.argv)>1 else "DE"
 LO,HI=10*60,75*60        # B seen 10-75 min after A
-c=psycopg2.connect(dbname="train_delay_db",user="trainuser",password=DB_PASSWORD,host="localhost"); cur=c.cursor()
+c=psycopg2.connect(**DB_CONFIG); cur=c.cursor()
 cur.execute("""
     SELECT DISTINCT ON (o.route_name,o.station_id,o.observed_date)
            o.station_id, o.observed_date, o.route_name, o.delay_minutes, o.actual_arrival
@@ -67,7 +67,7 @@ print(f"   share < -0.5 : {np.mean(rs<-0.5)*100:.1f}%")
 print(f"   (a symmetric spread around 0 = noise; a positive skew = real coupling)")
 
 out.sort(reverse=True)
-cur2=psycopg2.connect(dbname="train_delay_db",user="trainuser",password=DB_PASSWORD,host="localhost").cursor()
+cur2=psycopg2.connect(**DB_CONFIG).cursor()
 def nm(sid):
     cur2.execute("SELECT COALESCE(display_name,name) FROM stations WHERE id=%s",(sid,)); r=cur2.fetchone()
     return r[0] if r else str(sid)

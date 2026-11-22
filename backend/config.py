@@ -34,6 +34,16 @@ if not DB_PASSWORD:
         "and set a real password matching the trainuser role in Postgres."
     )
 
+# The one place the connection settings live. Every module, script and test
+# connects with psycopg2.connect(**DB_CONFIG). Host, name and user default to
+# the production setup and can be overridden for a different machine or CI.
+DB_CONFIG = {
+    "dbname": os.environ.get("TRAIN_DB_NAME", "train_delay_db"),
+    "user": os.environ.get("TRAIN_DB_USER", "trainuser"),
+    "password": DB_PASSWORD,
+    "host": os.environ.get("TRAIN_DB_HOST", "localhost"),
+}
+
 # Web Push (VAPID). Optional, unlike the DB password: alerts are a feature, and
 # a box without keys should serve the rest of the site normally rather than
 # refuse to start. push_alerts and /push/* check PUSH_ENABLED and report the

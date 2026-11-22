@@ -2,8 +2,8 @@
 import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
 import psycopg2, numpy as np
 from collections import defaultdict
-from config import DB_PASSWORD
-c=psycopg2.connect(dbname="train_delay_db",user="trainuser",password=DB_PASSWORD,host="localhost"); cur=c.cursor()
+from config import DB_CONFIG
+c=psycopg2.connect(**DB_CONFIG); cur=c.cursor()
 cur.execute("""
     SELECT DISTINCT ON (o.trip_id,o.observed_date,o.stop_sequence)
            o.trip_id,o.observed_date,o.stop_sequence,o.delay_minutes,

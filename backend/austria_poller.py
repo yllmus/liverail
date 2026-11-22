@@ -7,14 +7,7 @@ from datetime import date
 
 from at_route_names import extract_at_train_number
 from trip_resolution import lookup_stop_identity, resolve_ambiguous_trip, local_now
-from config import DB_PASSWORD
-
-DB_CONFIG = {
-    "dbname": "train_delay_db",
-    "user": "trainuser",
-    "password": DB_PASSWORD,
-    "host": "localhost"
-}
+from config import DB_CONFIG
 
 COUNTRY_CODE = "AT"
 # The Node scripts sit next to this file, so they are found from any

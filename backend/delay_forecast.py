@@ -50,7 +50,7 @@ from collections import defaultdict
 import numpy as np
 import psycopg2
 
-from config import DB_PASSWORD
+from config import DB_CONFIG
 
 # Ignore readings this far apart when treating two stops as one journey. A
 # stop's stored delay is only as fresh as the last time it sat in the sampling
@@ -60,8 +60,7 @@ MAX_ABS_DELAY = 720.0        # the same implausible-delay guard used elsewhere
 
 
 def connect():
-    return psycopg2.connect(dbname="train_delay_db", user="trainuser",
-                            password=DB_PASSWORD, host="localhost")
+    return psycopg2.connect(**DB_CONFIG)
 
 
 def _hms(v):

@@ -31,7 +31,7 @@ import sys
 import psycopg2
 import requests
 
-from config import DB_PASSWORD
+from config import DB_CONFIG
 from poller import GRAPHQL_URL, QUERY, parse_vehicles
 from station_names import clean_display_name
 
@@ -75,8 +75,7 @@ def lookup_stop(name):
 
 def main():
     write = "--write" in sys.argv
-    conn = psycopg2.connect(dbname="train_delay_db", user="trainuser",
-                            password=DB_PASSWORD, host="localhost")
+    conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     missing, rows = unmatched_station_names(cur)
     lost = [r for r in rows if r["stop_name"] in set(missing)]

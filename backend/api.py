@@ -34,7 +34,7 @@ from germany_poller import (
 )
 from station_names import clean_display_name
 from hu_route_names import clean_route_name, extract_train_number
-from config import DB_PASSWORD
+from config import DB_CONFIG
 import transfer_model
 
 app = FastAPI()
@@ -45,13 +45,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-DB_CONFIG = {
-    "dbname": "train_delay_db",
-    "user": "trainuser",
-    "password": DB_PASSWORD,
-    "host": "localhost"
-}
 
 def get_conn():
     return psycopg2.connect(**DB_CONFIG)

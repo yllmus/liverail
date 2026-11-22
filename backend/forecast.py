@@ -50,7 +50,7 @@ from collections import defaultdict
 import numpy as np
 import psycopg2
 
-from config import DB_PASSWORD
+from config import DB_CONFIG
 
 MAX_ABS_DELAY = 720.0
 # Delay bands for stage one. Deliberately the app's own severity tiers rather
@@ -64,8 +64,7 @@ TARGET_COVERAGE = 0.90
 
 
 def connect():
-    return psycopg2.connect(dbname="train_delay_db", user="trainuser",
-                            password=DB_PASSWORD, host="localhost")
+    return psycopg2.connect(**DB_CONFIG)
 
 
 def band_of(delay):

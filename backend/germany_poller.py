@@ -7,14 +7,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from google.transit import gtfs_realtime_pb2
 
-from config import DB_PASSWORD
-
-DB_CONFIG = {
-    "dbname": "train_delay_db",
-    "user": "trainuser",
-    "password": DB_PASSWORD,
-    "host": "localhost"
-}
+from config import DB_CONFIG
 
 COUNTRY_CODE = "DE"
 # How many of a trip's remaining stops to record ON EACH POLL. This is NOT a

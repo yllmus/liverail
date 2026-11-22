@@ -49,7 +49,7 @@ import zipfile
 
 import psycopg2
 
-from config import DB_PASSWORD
+from config import DB_CONFIG
 
 WORK = os.path.expanduser("~/gtfs_refresh")
 # A tripwire for real corruption, not for ordinary feed churn - see
@@ -100,8 +100,7 @@ WANTED = ("stops.txt", "routes.txt", "trips.txt", "stop_times.txt",
 
 
 def connect():
-    return psycopg2.connect(dbname="train_delay_db", user="trainuser",
-                            password=DB_PASSWORD, host="localhost")
+    return psycopg2.connect(**DB_CONFIG)
 
 
 def fetch(url, dest):

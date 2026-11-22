@@ -29,7 +29,7 @@ import time
 
 import psycopg2
 
-from config import DB_PASSWORD
+from config import DB_CONFIG
 
 TASK = "transfer_risk"
 # How often to look for a newly promoted champion. The loop retrains weekly, so
@@ -42,8 +42,7 @@ _LOCK = threading.Lock()
 
 
 def _connect():
-    return psycopg2.connect(dbname="train_delay_db", user="trainuser",
-                            password=DB_PASSWORD, host="localhost")
+    return psycopg2.connect(**DB_CONFIG)
 
 
 def champion_path(country):

@@ -5,14 +5,7 @@ from datetime import date
 
 from hu_route_names import clean_route_name, extract_train_number
 from trip_resolution import lookup_stop_identity, resolve_ambiguous_trip, local_now
-from config import DB_PASSWORD
-
-DB_CONFIG = {
-    "dbname": "train_delay_db",
-    "user": "trainuser",
-    "password": DB_PASSWORD,
-    "host": "localhost"
-}
+from config import DB_CONFIG
 
 COUNTRY_CODE = "HU"
 

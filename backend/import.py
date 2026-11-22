@@ -6,7 +6,7 @@ from psycopg2.extras import execute_values
 
 from station_names import clean_display_name
 
-from config import DB_PASSWORD
+from config import DB_CONFIG
 
 
 def _gtfs_date(value):
@@ -16,13 +16,6 @@ def _gtfs_date(value):
         return None
     text = str(value).strip()
     return f"{text[0:4]}-{text[4:6]}-{text[6:8]}" if len(text) == 8 else None
-
-DB_CONFIG = {
-    "dbname": "train_delay_db",
-    "user": "trainuser",
-    "password": DB_PASSWORD,
-    "host": "localhost"
-}
 
 parser = argparse.ArgumentParser(description="Import a GTFS static feed into train_delay_db.")
 parser.add_argument("--country", default="HU", help="2-letter country code this feed belongs to (default: HU)")

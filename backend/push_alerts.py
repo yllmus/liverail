@@ -33,7 +33,7 @@ import time
 
 import psycopg2
 
-from config import (DB_PASSWORD, PUSH_ENABLED, VAPID_PRIVATE_KEY,
+from config import (DB_CONFIG, PUSH_ENABLED, VAPID_PRIVATE_KEY,
                     VAPID_SUBJECT)
 
 # Below this, a train is on time in every sense the rest of this project uses -
@@ -57,8 +57,7 @@ MAX_FAILURES = 5
 
 
 def connect():
-    return psycopg2.connect(dbname="train_delay_db", user="trainuser",
-                            password=DB_PASSWORD, host="localhost")
+    return psycopg2.connect(**DB_CONFIG)
 
 
 def decide(current, last):

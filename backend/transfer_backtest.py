@@ -67,7 +67,7 @@ from collections import defaultdict
 import numpy as np
 import psycopg2
 
-from config import DB_PASSWORD
+from config import DB_CONFIG
 
 # Interchange time assumed when scoring, in minutes. This is the parameter the
 # whole model is most sensitive to and the one no feed publishes; fit_mct()
@@ -77,8 +77,7 @@ MIN_SAMPLES_FOR_FIT = 30
 
 
 def connect():
-    return psycopg2.connect(dbname="train_delay_db", user="trainuser",
-                            password=DB_PASSWORD, host="localhost")
+    return psycopg2.connect(**DB_CONFIG)
 
 
 def hms_seconds(v):

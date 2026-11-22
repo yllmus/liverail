@@ -28,10 +28,9 @@ STAMP=$(date +%Y%m%d_%H%M%S)
 
 counts() {
     python3 - <<'PY'
-from config import DB_PASSWORD
+from config import DB_CONFIG
 import psycopg2, json, sys
-c = psycopg2.connect(dbname="train_delay_db", user="trainuser",
-                     password=DB_PASSWORD, host="localhost")
+c = psycopg2.connect(**DB_CONFIG)
 cur = c.cursor()
 out = {}
 cur.execute("SELECT country_code, count(*) FROM delay_observations GROUP BY 1 ORDER BY 1")
