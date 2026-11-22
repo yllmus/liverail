@@ -4,6 +4,21 @@ A live train delay tracker for Hungary, Austria, Poland and Germany. It polls ea
 
 **Status: archived.** I no longer host or develop it. The reasons are in [Why it stopped](#why-it-stopped).
 
+## The hard part: four feeds that disagree
+
+Every operator publishes live data in its own format, and no two of them identify a train, a stop or a delay the same way. The pollers have to turn all four into the same row, `(station, trip, delay)`, in one PostgreSQL table, and every country made that hard in a different way:
+
+| | Live feed | What was wrong with it | What the adapter does |
+|---|---|---|---|
+| **Hungary** | MÁV+ OpenTripPlanner, GraphQL | Live trip ids appear nowhere in the static timetable, and route names are slash-separated lists of every train number that has run on the line | Matches the train's public number against the timetable, then narrows the candidates by which services run today and by scheduled time |
+| **Austria** | ÖBB HAFAS, through `hafas-client` in Node | A default result cap silently dropped about 90% of trains, station names differ from the timetable's (`Hbf` against `Hauptbahnhof`), and arrival delays are never published | Requests up to 4,000 results instead of 256 (with a monitor check for a response pinned at the cap), tries normalised name variants in order, and leaves the arrival delay empty instead of copying the departure figure |
+| **Poland** | GTFS-RT TripUpdates from mkuran.pl | No delay, no stop id and no route id, only a trip id, a stop position and a timestamp | Computes the delay by joining each update to the timetable in Warsaw local time, including times past midnight, and discards impossible results |
+| **Germany** | GTFS-RT from gtfs.de | Stop ids point at platforms rather than stations, so at first not a single row matched. The long-distance and regional timetables use the same route ids for different routes, and stop ids are reissued between exports | Maps each platform to its station, prefixes route ids per file, and merges stations that a re-import splits in two |
+
+Each adapter has a pure `parse` function, unit-tested against fixtures, and a separate step that resolves the parsed rows against the timetable. The biggest risk throughout was data going missing without an error, so the pollers count the rows the database actually accepted, and `monitor.py` tracks each country's match rate over time. The details for each country are in [docs/data-sources.md](docs/data-sources.md).
+
+Every five minutes the pollers took in about 300 trains from Hungary, 1,000 from Austria, 20,000 trip updates from Poland and 30,000 stop updates from Germany, all on one server with 2 GB of RAM. The repository has 232 tests.
+
 ## What it does
 
 - **Live board and map.** Every train currently running in a country, ranked by delay, with a position on the map.
@@ -74,8 +89,6 @@ sequenceDiagram
     API->>DB: aggregate (covering index or warm cache)
     API-->>Browser: on-time share, averages, heatmap
 ```
-
-The four countries expose very different data, so most of the work is in the per-country adapters. See [docs/data-sources.md](docs/data-sources.md).
 
 ## Stack
 

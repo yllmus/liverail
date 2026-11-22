@@ -85,7 +85,7 @@ The live view in `api.py` reuses the same parse functions through a small regist
 ## Austria
 
 - **Feed.** `hafas-client` with the ÖBB profile, run as a one-shot Node subprocess per call (`hafas/radar.js` for the live map, `trip.js` for a single journey, `journeys.js` for journey planning). A persistent Node service would not fit in the memory of the server. The hosted `oebb.transport.rest` wrapper no longer resolves.
-- **Result cap.** `radar()` returns 256 results by default, which silently dropped about 90% of the national feed. The poller requests up to 2000.
+- **Result cap.** `radar()` returns 256 results by default, which silently dropped about 90% of the national feed. The cap was raised to 2000, which turned out to truncate again at evening peak (2,143 movements), so the poller now requests up to 4000. `monitor.py` flags a response that comes back exactly at the cap, since this will recur as traffic grows.
 - **Trams and U-Bahn.** HAFAS labels Vienna's trams and U-Bahn as mode `train`, separated from rail only by product. ÖBB's rail GTFS contains no tram stops, so almost none of those rows could resolve to a station. They are excluded, which also drops a few genuine tram-train services.
 - **Station names.** HAFAS and GTFS disagree on formatting (`Hbf` against `Hauptbahnhof`, a missing space after an abbreviating dot, parenthetical qualifiers). `station_name_candidates()` tries a list of normalised variants in order.
 - **Delays.** `radar()` never sets an arrival delay, only a departure delay, so `delay_arrival_minutes` is NULL for Austria. Filling it from the departure delay would invent a figure ÖBB never published. `trip()` does carry both, so the per-train page has them.
