@@ -15,6 +15,7 @@ client = TestClient(api.app)
 # every other part of this project runs against the real DB rather than a
 # separate test-DB harness. They will fail if no Postgres is reachable.
 
+@pytest.mark.db
 def test_countries_returns_hu_with_attribution_field():
     resp = client.get("/countries")
     assert resp.status_code == 200
@@ -23,6 +24,7 @@ def test_countries_returns_hu_with_attribution_field():
     assert "attribution" in codes["HU"]
     assert codes["HU"]["attribution"] is None
 
+@pytest.mark.db
 def test_stations_defaults_to_hu():
     resp = client.get("/stations")
     assert resp.status_code == 200
@@ -67,6 +69,7 @@ def test_live_at_mocks_radar_subprocess(monkeypatch):
     assert body[0]["route_name"] == "RJ 61"
     assert body[0]["current_stop"] == "Wien Meidling"
 
+@pytest.mark.db
 def test_live_pl_mocks_gtfs_rt_fetch(monkeypatch):
     feed = gtfs_realtime_pb2.FeedMessage()
     feed.header.gtfs_realtime_version = "2.0"
@@ -90,6 +93,7 @@ def test_live_pl_mocks_gtfs_rt_fetch(monkeypatch):
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
 
+@pytest.mark.real_data
 def test_live_de_mocks_gtfs_rt_fetch(monkeypatch):
     feed = gtfs_realtime_pb2.FeedMessage()
     feed.header.gtfs_realtime_version = "2.0"
@@ -119,6 +123,7 @@ def test_live_de_mocks_gtfs_rt_fetch(monkeypatch):
 # delay figures, which change every five minutes.
 
 @pytest.mark.slow  # whole-country aggregate; see pytest.ini / docs/testing.md
+@pytest.mark.db
 def test_operators_summary_returns_a_ranking_or_says_why_not():
     resp = client.get("/operators/summary?country=DE")
     assert resp.status_code == 200
@@ -130,6 +135,7 @@ def test_operators_summary_returns_a_ranking_or_says_why_not():
         assert row["total"] >= 20  # the HAVING floor
 
 @pytest.mark.slow  # whole-country aggregate; see pytest.ini / docs/testing.md
+@pytest.mark.db
 def test_operators_summary_explains_an_empty_ranking():
     # PL's feed carries no agency_name at all. An empty table must say why -
     # silence would read as "no data yet" for a gap that is permanent.
@@ -140,6 +146,7 @@ def test_operators_summary_explains_an_empty_ranking():
         assert "operator names" in body["meta"]["note"]
 
 @pytest.mark.slow  # whole-country aggregate; see pytest.ini / docs/testing.md
+@pytest.mark.real_data
 def test_operators_summary_csv_export():
     resp = client.get("/operators/summary?country=HU&format=csv")
     assert resp.status_code == 200
@@ -148,6 +155,7 @@ def test_operators_summary_csv_export():
     assert resp.text.splitlines()[0].startswith("operator,")
 
 @pytest.mark.slow  # whole-country aggregate; see pytest.ini / docs/testing.md
+@pytest.mark.real_data
 def test_routes_summary_csv_matches_the_json_rows():
     # The export must come from the same cached rows the page renders, not a
     # second query that could drift from it.
@@ -157,6 +165,7 @@ def test_routes_summary_csv_matches_the_json_rows():
     assert len(csv_text.strip().splitlines()) == len(rows) + 1  # + header
 
 @pytest.mark.slow  # same missing index as the past-date case above
+@pytest.mark.db
 def test_station_board_defaults_to_today():
     resp = client.get("/station/Budapest-Keleti/board?country=HU")
     assert resp.status_code == 200
@@ -177,11 +186,13 @@ def test_station_board_rejects_a_malformed_date():
                    # an Index Cond: every row for a busy station is heap-fetched
                    # and discarded. Today's date is fast only because those rows
                    # are still in page cache. Fix is an index - see docs/testing.md.
+@pytest.mark.db
 def test_station_board_accepts_a_past_date():
     resp = client.get("/station/Budapest-Keleti/board?country=HU&date=2026-08-20")
     assert resp.status_code == 200
     assert resp.json()["meta"]["date"] == "2026-08-20"
 
+@pytest.mark.db
 def test_train_history_route_is_not_swallowed_by_the_catchall():
     # /train/{country}/{id:path} is greedy and matched /train/DE/x/history
     # until the more specific route was registered first. Guard against a
@@ -192,6 +203,7 @@ def test_train_history_route_is_not_swallowed_by_the_catchall():
     assert "identity_basis" in body
     assert body["has_history"] is False
 
+@pytest.mark.db
 def test_train_history_reports_its_identity_basis():
     resp = client.get("/train/PL/definitely-not-a-real-trip/history")
     body = resp.json()
@@ -204,6 +216,7 @@ def test_train_history_rejects_an_unknown_country():
     resp = client.get("/train/ZZ/whatever/history")
     assert resp.status_code == 400
 
+@pytest.mark.db
 def test_train_history_clamps_the_day_range():
     resp = client.get("/train/DE/nope/history?days=99999")
     assert resp.json()["days"] == api._HISTORY_MAX_DAYS
@@ -214,6 +227,7 @@ def test_train_history_clamps_the_day_range():
 # Runs against the real local search_index, same as the rest of this suite
 # runs against real local Postgres.
 
+@pytest.mark.real_data
 def test_search_requires_no_exact_spelling():
     # The whole point of the endpoint: this returned nothing at all under the
     # old client-side substring match.
@@ -222,6 +236,7 @@ def test_search_requires_no_exact_spelling():
     names = [r["name"] for r in resp.json()["results"]]
     assert any("Budapest" in n for n in names)
 
+@pytest.mark.real_data
 def test_search_folds_diacritics_the_rider_cannot_type():
     # `Kraków Główny` was unreachable from an ASCII keyboard before the
     # search_text folding existed - measured zero results.
@@ -229,6 +244,7 @@ def test_search_folds_diacritics_the_rider_cannot_type():
     names = [r["name"] for r in resp.json()["results"]]
     assert any("Kraków" in n for n in names)
 
+@pytest.mark.real_data
 def test_search_ranks_the_busy_station_above_the_lookalike():
     # "Munchen" scored Munchhausen (0 observations) above München Hbf on pure
     # trigram similarity. The popularity term is what fixed it.
@@ -236,6 +252,7 @@ def test_search_ranks_the_busy_station_above_the_lookalike():
     results = resp.json()["results"]
     assert results and results[0]["observations"] > 0
 
+@pytest.mark.db
 def test_search_kind_filter_returns_only_that_kind():
     resp = client.get("/search?q=Budapest&country=HU&kind=route&limit=10")
     assert all(r["kind"] == "route" for r in resp.json()["results"])
@@ -245,6 +262,7 @@ def test_search_empty_query_is_not_an_error():
     assert resp.status_code == 200
     assert resp.json()["results"] == []
 
+@pytest.mark.db
 def test_search_limit_is_clamped():
     resp = client.get("/search?q=a&country=HU&limit=9999")
     assert len(resp.json()["results"]) <= 50
@@ -253,6 +271,7 @@ def test_search_limit_is_clamped():
 
 @pytest.mark.slow  # /sitemap.xml warms routes_list for ALL FOUR countries;
                    # ~60-90s cold (nginx's timeout was raised to 120s for it)
+@pytest.mark.db
 def test_thin_pages_are_excluded_from_the_sitemap():
     resp = client.get("/sitemap.xml")
     assert resp.status_code == 200
@@ -269,6 +288,7 @@ def test_thin_pages_are_excluded_from_the_sitemap():
         from urllib.parse import quote
         assert f"/station/{quote(row[0])}" not in resp.text
 
+@pytest.mark.db
 def test_a_thin_page_still_renders_but_says_noindex():
     # The page is not removed - a rider following a link to a quiet halt
     # still gets a real answer. It is only kept out of the index.
@@ -289,6 +309,7 @@ def test_a_thin_page_still_renders_but_says_noindex():
 @pytest.mark.slow  # the SEO page for a BUSY station (Budapest-Keleti, 164k+ rows).
                    # The thin-page test above passes instantly - it is row volume
                    # on a cold page cache, same family as the board tests.
+@pytest.mark.real_data
 def test_a_busy_page_is_still_indexable():
     resp = client.get("/t/HU/station/Budapest-Keleti")
     assert resp.status_code == 200
@@ -298,6 +319,7 @@ def test_a_busy_page_is_still_indexable():
 # DE and PL are used throughout: their identity resolution is a direct
 # gtfs_trip_id lookup. HU and AT would call get_live_*() and hit the network.
 
+@pytest.mark.db
 def test_train_stops_route_is_not_swallowed_by_the_catchall():
     # Same greedy-route hazard the /history test guards. /stops was registered
     # after /history and before /train/{country}/{id:path}; a future reorder
@@ -306,6 +328,7 @@ def test_train_stops_route_is_not_swallowed_by_the_catchall():
     assert resp.status_code == 200
     assert "stops" in resp.json()
 
+@pytest.mark.db
 def test_train_stops_explains_an_unresolved_trip_instead_of_returning_nothing():
     # Phase 1 writes stop_sequence only when the trip resolved, so an
     # unresolved train has no stop rows at all. An empty list on its own would
@@ -315,6 +338,7 @@ def test_train_stops_explains_an_unresolved_trip_instead_of_returning_nothing():
     assert body["reason"]
     assert "stop identity" in body["reason"]
 
+@pytest.mark.db
 def test_train_stops_flags_that_at_publishes_no_arrival_delays():
     # Structural, not a thin sample: OBB's radar() never sets arrivalDelay
     # (0/314 measured), so the arrival columns are permanently NULL for AT.
@@ -325,6 +349,7 @@ def test_train_stops_flags_that_at_publishes_no_arrival_delays():
 def test_train_stops_rejects_an_unknown_country():
     assert client.get("/train/ZZ/whatever/stops").status_code == 400
 
+@pytest.mark.db
 def test_train_stops_clamps_the_day_range():
     assert client.get("/train/DE/nope/stops?days=99999").json()["days"] == api._HISTORY_MAX_DAYS
     assert client.get("/train/DE/nope/stops?days=0").json()["days"] == 1
@@ -334,9 +359,11 @@ def test_train_stops_clamps_the_day_range():
 def test_distribution_requires_a_station():
     assert client.get("/distribution?country=AT").status_code == 400
 
+@pytest.mark.db
 def test_distribution_404s_on_an_unknown_station():
     assert client.get("/distribution?country=AT&station=Nowhere-At-All").status_code == 404
 
+@pytest.mark.real_data
 def test_distribution_reports_which_ladder_rung_answered():
     # A figure whose provenance is invisible is worse than no figure: "based
     # on this exact train" and "based on the station generally" are different
@@ -348,6 +375,7 @@ def test_distribution_reports_which_ladder_rung_answered():
         assert b["basis"] in ("trip", "route", "station")
         assert b["sample_count"] >= b["min_sample"]
 
+@pytest.mark.real_data
 def test_distribution_refuses_rather_than_quoting_a_thin_sample():
     # An unreachable minimum must exhaust the ladder and say so, not return
     # the coarsest rung anyway. A probability from four observations is a lie
@@ -358,6 +386,7 @@ def test_distribution_refuses_rather_than_quoting_a_thin_sample():
     assert b["basis"] is None
     assert b["reason"]
 
+@pytest.mark.real_data
 def test_distribution_falls_back_when_the_route_is_unknown():
     # A route with no cell must drop to the station rung, not 404 and not
     # silently report the route as its basis.
@@ -389,10 +418,12 @@ def test_plan_rejects_a_malformed_date_or_time():
     assert client.get("/plan?country=HU&origin=Debrecen&destination=Sopron"
                       "&time_=9am").status_code == 400
 
+@pytest.mark.db
 def test_plan_404s_on_an_unknown_station():
     r = client.get("/plan?country=HU&origin=Nowhere-At-All-XYZ&destination=Sopron")
     assert r.status_code == 404
 
+@pytest.mark.real_data
 def test_plan_rejects_identical_endpoints():
     r = client.get("/plan?country=HU&origin=Debrecen&destination=Debrecen")
     assert r.status_code == 400
@@ -402,6 +433,7 @@ def test_plan_rejects_identical_endpoints():
 def test_transfer_risk_requires_a_station():
     assert client.get("/transfer/risk?country=AT").status_code == 400
 
+@pytest.mark.db
 def test_transfer_risk_refuses_when_no_rung_is_deep_enough():
     # Suppressed entirely rather than computed from the connector alone: the
     # feeder's delay is what decides a transfer, and a figure missing it would
@@ -411,6 +443,7 @@ def test_transfer_risk_refuses_when_no_rung_is_deep_enough():
     assert b["assessed"] is False
     assert b["reason"]
 
+@pytest.mark.db
 def test_transfer_risk_always_flags_the_interchange_assumption():
     # No feed publishes a minimum interchange time for AT, so the figure used
     # is a default. It must never be presented as measured.
@@ -420,6 +453,7 @@ def test_transfer_risk_always_flags_the_interchange_assumption():
         assert b["interchange_is_assumption"] is True
         assert b["interchange_note"]
 
+@pytest.mark.real_data
 def test_transfer_risk_is_monotonic_in_the_buffer():
     # More slack can never make a connection less likely. This caught a real
     # modelling bug: `worst` was being treated as the 100th percentile, which
@@ -433,6 +467,7 @@ def test_transfer_risk_is_monotonic_in_the_buffer():
     assert ps == sorted(ps)
     assert ps and ps[0] < ps[-1]
 
+@pytest.mark.db
 def test_transfer_risk_never_claims_certainty():
     # The quantile fallback stops at p95 and cannot report better than 0.95.
     # The mixture models the tail and has no such ceiling, but must still never
@@ -458,6 +493,7 @@ def test_plan_supports_every_registered_planner_country():
 
 # --- Safer-train suggestions ------------------------------------------
 
+@pytest.mark.real_data
 def test_safer_connectors_are_offered_only_for_a_tight_change():
     # Attaching alternatives to a comfortable change invites second-guessing a
     # decision that is already fine, and costs a query plus a risk assessment
@@ -471,6 +507,7 @@ def test_safer_connectors_are_offered_only_for_a_tight_change():
             if t.get("alternatives"):
                 assert risk.get("label") in ("tight", "unlikely")
 
+@pytest.mark.real_data
 def test_safer_connectors_actually_give_more_buffer():
     # An "alternative" that leaves sooner than the one already listed is not an
     # alternative, it is a worse option wearing the same label.
@@ -481,6 +518,7 @@ def test_safer_connectors_actually_give_more_buffer():
             for alt in t.get("alternatives") or []:
                 assert alt["buffer_min"] > t["buffer_min"]
 
+@pytest.mark.real_data
 def test_plan_never_leaks_its_internal_time_keys():
     r = client.get("/plan?country=PL&origin=Warszawa Centralna"
                    "&destination=Kraków Główny&time_=08:00&itineraries=2")
@@ -493,6 +531,7 @@ def test_plan_never_leaks_its_internal_time_keys():
 def test_int_is_a_registered_planner():
     assert api._PLAN_PROVIDERS.get("INT")
 
+@pytest.mark.db
 def test_resolve_station_anywhere_prefers_depth_over_an_exact_match():
     # The regression this exists for: DE's import holds a station literally
     # named "Bohumin" with zero observations, while PL holds the same station
@@ -508,6 +547,7 @@ def test_resolve_station_anywhere_prefers_depth_over_an_exact_match():
         assert row[0] == "PL", f"expected PL to win on depth, got {row}"
         assert row[4] > 0
 
+@pytest.mark.real_data
 def test_resolve_station_anywhere_strips_hafas_platform_groups():
     # HAFAS appends platform groups in two shapes, only one parenthesised.
     conn = api.get_conn()
@@ -520,6 +560,7 @@ def test_resolve_station_anywhere_strips_hafas_platform_groups():
     finally:
         cur.close(); conn.close()
 
+@pytest.mark.db
 def test_resolve_station_anywhere_returns_none_for_a_country_we_do_not_import():
     conn = api.get_conn()
     cur = conn.cursor()
@@ -529,6 +570,7 @@ def test_resolve_station_anywhere_returns_none_for_a_country_we_do_not_import():
         cur.close(); conn.close()
     assert row is None
 
+@pytest.mark.real_data
 def test_search_scope_all_crosses_countries():
     # The point of a four-country site: someone reading Hungarian delays who
     # searches for Wien should find it.
@@ -536,6 +578,7 @@ def test_search_scope_all_crosses_countries():
     assert b["scope"] == "all"
     assert any(r["country_code"] == "AT" for r in b["results"])
 
+@pytest.mark.db
 def test_search_default_scope_is_unchanged():
     # Every existing caller passes no scope and must keep country-only
     # behaviour - a silent widening would change what the whole frontend shows.
@@ -543,6 +586,7 @@ def test_search_default_scope_is_unchanged():
     assert b["scope"] == "country"
     assert all(r.get("country_code") == "HU" for r in b["results"])
 
+@pytest.mark.db
 def test_search_scope_all_dedupes_one_station_held_by_several_feeds():
     # Budapest-Keleti is in AT's, DE's and HU's imports; only HU's has history.
     b = client.get("/search?q=Budapest-Keleti&country=AT&scope=all&limit=8").json()
@@ -553,6 +597,7 @@ def test_search_scope_all_dedupes_one_station_held_by_several_feeds():
 
 # --- Journey reliability and cancellation rights -----------------------
 
+@pytest.mark.real_data
 def test_plan_ranks_by_reliability_not_departure_time():
     r = client.get("/plan?country=HU&origin=Debrecen&destination=Sopron"
                    "&time_=09:00&itineraries=4")
@@ -563,6 +608,7 @@ def test_plan_ranks_by_reliability_not_departure_time():
     # Most likely to work first. Assessed ones must be in descending order.
     assert scored == sorted(scored, reverse=True)
 
+@pytest.mark.real_data
 def test_unassessed_journeys_are_not_ranked_as_poor():
     # No history and a bad record are different things. An itinerary that
     # cannot be judged sorts after the ones that can, never among them by a
@@ -590,6 +636,7 @@ def test_cancellation_under_the_threshold_is_not_eligible():
                    "&resulting_delay_minutes=25").json()
     assert b["eligible"] is False
 
+@pytest.mark.db
 def test_cancellation_always_offers_refund_or_rerouting():
     # These are unconditional under EU 2021/782 and survive an
     # extraordinary-circumstances refusal that kills the compensation. A rider
@@ -602,6 +649,7 @@ def test_cancellation_always_offers_refund_or_rerouting():
     assert "strike does not count" in b["caveat"]
     assert b["source_url"]
 
+@pytest.mark.db
 def test_cancellation_scales_with_the_delay_it_caused():
     b = client.get("/compensation/check?country=HU&cancelled=true"
                    "&resulting_delay_minutes=140&ticket_price=40").json()
